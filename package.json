@@ -1,38 +1,38 @@
 {
-	"dependencies": {
-		"@prisma/client": "^6.19.0",
-		"@t3-oss/env-nextjs": "^0.13.8",
-		"dotenv": "^17.2.3",
-		"framer-motion": "^12.0.0",
-		"next": "16.0.7",
-		"react": "^19.2.0",
-		"react-dom": "^19.2.0"
-	},
-	"description": "This project was bootstrapped with create-rubric-app",
-	"devDependencies": {
-		"@rubriclab/config": "^0.0.22",
-		"@types/node": "^24.10.1",
-		"@types/react": "^19.2.3",
-		"@types/react-dom": "^19.2.3",
-		"prisma": "^6.19.0",
-		"typescript": "^5.9.3",
-		"zod": "^4.1.12"
-	},
-	"license": "go nuts",
-	"name": "my-app",
-	"private": true,
-	"scripts": {
-		"bleed": "bun x npm-check-updates -u --dep prod,dev,optional,peer",
-		"build": "next build",
-		"check": "bun x biome check .",
-		"clean": "rm -rf .next && rm -rf node_modules",
-		"db:generate": "prisma generate",
-		"db:push": "bun --env-file=.env prisma generate && prisma db push",
-		"db:seed": "prisma db seed",
-		"db:studio": "prisma studio",
-		"dev": "next dev",
-		"format": "bun x biome check --write .",
-		"start": "next start"
-	},
-	"version": "0.0.0"
+  "dependencies": {
+    "@prisma/client": "^6.19.0",
+    "@t3-oss/env-nextjs": "^0.13.8",
+    "dotenv": "^17.2.3",
+    "framer-motion": "^12.0.0",
+    "next": "16.0.10",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "description": "This project was bootstrapped with create-rubric-app",
+  "devDependencies": {
+    "@rubriclab/config": "^0.0.22",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.3",
+    "@types/react-dom": "^19.2.3",
+    "prisma": "^6.19.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.1.12"
+  },
+  "license": "go nuts",
+  "name": "my-app",
+  "private": true,
+  "scripts": {
+    "bleed": "bun x npm-check-updates -u --dep prod,dev,optional,peer",
+    "build": "next build",
+    "check": "bun x biome check .",
+    "clean": "rm -rf .next && rm -rf node_modules",
+    "db:generate": "prisma generate",
+    "db:push": "bun --env-file=.env prisma generate && prisma db push",
+    "db:seed": "prisma db seed",
+    "db:studio": "prisma studio",
+    "dev": "next dev",
+    "format": "bun x biome check --write .",
+    "start": "next start"
+  },
+  "version": "0.0.0"
 }
