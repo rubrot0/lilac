@@ -17,7 +17,7 @@ export type RealtimeSession = z.infer<typeof RealtimeSessionSchema>
 
 const CreateSessionInputSchema = z.object({
 	instructions: z.string().optional(),
-	model: z.string().default('gpt-realtime'),
+	model: z.string().default('gpt-realtime-1.5'),
 	voice: z.string().default('verse')
 })
 
