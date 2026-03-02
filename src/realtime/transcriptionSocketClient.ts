@@ -99,9 +99,9 @@ export class TranscriptionSocketClient {
 	}
 
 	public async start(input: StartTranscriptionSocketClientInput): Promise<void> {
+		this.stop()
 		this.generation += 1
 		const generation = this.generation
-		this.stop()
 		this.callbacks.onConnectionStateChange('connecting')
 
 		try {

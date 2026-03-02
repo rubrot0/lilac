@@ -71,9 +71,9 @@ export class ChatRealtimeClient {
 	}
 
 	public async start(input: StartChatRealtimeClientInput): Promise<void> {
+		this.stop()
 		this.generation += 1
 		const generation = this.generation
-		this.stop()
 		this.callbacks.onConnectionStateChange('connecting')
 
 		let localAudioStream: MediaStream | null = null
