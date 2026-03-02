@@ -1,3 +1,6 @@
 {
-	"extends": ["@rubriclab/config/biome"]
+	"extends": ["@rubriclab/config/biome"],
+	"files": {
+		"includes": ["**", "!next-env.d.ts"]
+	}
 }

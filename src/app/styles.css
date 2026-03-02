@@ -2,6 +2,9 @@
 
 :root {
 	color-scheme: light dark;
+	--lilac-direction-primary: #0f8a78;
+	--lilac-direction-secondary: #2f6dd8;
+	--lilac-direction-transcribe: #8f4dd3;
 	--lilac-surface: #f7f3e7;
 	--lilac-elevated: rgba(255, 255, 255, 0.7);
 	--lilac-ink: #352049;
@@ -10,6 +13,9 @@
 
 @media (prefers-color-scheme: dark) {
 	:root {
+		--lilac-direction-primary: #2cc7b2;
+		--lilac-direction-secondary: #6ea8ff;
+		--lilac-direction-transcribe: #bf8dff;
 		--lilac-surface: #120c1e;
 		--lilac-elevated: rgba(255, 255, 255, 0.08);
 		--lilac-ink: #f6f1ff;

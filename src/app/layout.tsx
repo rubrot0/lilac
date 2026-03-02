@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from 'next'
 import type { ReactNode } from 'react'
 
 import './styles.css'
-import { RealtimeProvider } from '@/realtime/provider'
+import { LilacModeRuntimeProvider } from '@/realtime/modeRuntimeStore'
 
 export const metadata: Metadata = {
 	appleWebApp: {
@@ -19,10 +19,6 @@ export const metadata: Metadata = {
 		]
 	},
 	manifest: '/manifest.webmanifest',
-	themeColor: [
-		{ color: '#F7F3E7', media: '(prefers-color-scheme: light)' },
-		{ color: '#120C1E', media: '(prefers-color-scheme: dark)' }
-	],
 	title: {
 		default: 'Lilac',
 		template: '%s · Lilac'
@@ -33,6 +29,10 @@ export const viewport: Viewport = {
 	initialScale: 1,
 	maximumScale: 1,
 	minimumScale: 1,
+	themeColor: [
+		{ color: '#F7F3E7', media: '(prefers-color-scheme: light)' },
+		{ color: '#120C1E', media: '(prefers-color-scheme: dark)' }
+	],
 	userScalable: false,
 	viewportFit: 'cover'
 }
@@ -41,7 +41,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
 	return (
 		<html lang="en">
 			<body className="min-h-svh bg-[var(--lilac-surface)] text-[var(--lilac-ink)] antialiased transition-colors">
-				<RealtimeProvider>{children}</RealtimeProvider>
+				<LilacModeRuntimeProvider>{children}</LilacModeRuntimeProvider>
 			</body>
 		</html>
 	)
