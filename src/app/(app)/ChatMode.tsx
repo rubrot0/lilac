@@ -104,7 +104,7 @@ function ChatSettingsContent({
 							setChatTurnDelaySeconds(normalizedValue)
 						}}
 						data-testid="chat-turn-delay-slider"
-						className="[&_[data-slot=slider-range]]:bg-[var(--lilac-ink)]"
+						className="[&_[data-slot=slider-range]]:bg-[var(--lilac-brand-primary)]"
 					/>
 					<div className="flex items-center justify-between text-sm">
 						<span className="text-[var(--lilac-ink-muted)]">Delay</span>
@@ -130,7 +130,7 @@ function ChatSettingsContent({
 						type="button"
 						variant="outline"
 						data-testid="chat-instructions-reset"
-						className="border-[var(--lilac-border)] bg-[var(--lilac-elevated)] text-[var(--lilac-ink-muted)]"
+						className="border-[var(--lilac-border)] bg-[var(--lilac-elevated)] text-[var(--lilac-ink)]"
 						onClick={() => {
 							setDraftInstructions(chatInstructions)
 							setDraftTurnDelaySeconds(normalizeTurnDelaySeconds(draftTurnDelaySeconds))
@@ -141,7 +141,7 @@ function ChatSettingsContent({
 					<Button
 						type="button"
 						data-testid="chat-instructions-save"
-						className="bg-[var(--lilac-ink)] text-[var(--lilac-surface)]"
+						className="bg-[var(--lilac-brand-primary)] text-[var(--lilac-brand-primary-foreground)]"
 						onClick={() => {
 							setChatInstructions(draftInstructions.trim() || defaultChatInstructions)
 							setSaveMessage('Saved')
@@ -267,7 +267,7 @@ export default function ChatMode() {
 							<Button
 								type="button"
 								variant="outline"
-								className="hidden h-9 rounded-xl border-[var(--lilac-border)] bg-[var(--lilac-card)] text-[var(--lilac-ink-muted)] sm:inline-flex"
+								className="hidden h-9 rounded-xl border-[var(--lilac-border)] bg-[var(--lilac-card)] text-[var(--lilac-ink)] sm:inline-flex"
 								data-testid="chat-settings-open-desktop"
 							>
 								Settings
@@ -304,7 +304,7 @@ export default function ChatMode() {
 							<Button
 								type="button"
 								variant="outline"
-								className="h-9 rounded-xl border-[var(--lilac-border)] bg-[var(--lilac-card)] text-[var(--lilac-ink-muted)] sm:hidden"
+								className="h-9 rounded-xl border-[var(--lilac-border)] bg-[var(--lilac-card)] text-[var(--lilac-ink)] sm:hidden"
 								data-testid="chat-settings-open-mobile"
 							>
 								Settings
@@ -351,7 +351,7 @@ export default function ChatMode() {
 							const bubbleBaseClasses =
 								'max-w-[92%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed'
 							const bubbleClasses = isUser
-								? `${bubbleBaseClasses} self-end bg-[var(--lilac-ink)] text-[var(--lilac-surface)]`
+								? `${bubbleBaseClasses} self-end bg-[var(--lilac-brand-primary)] text-[var(--lilac-brand-primary-foreground)]`
 								: `${bubbleBaseClasses} self-start border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] text-[var(--lilac-ink)]`
 
 							return (
@@ -405,7 +405,7 @@ export default function ChatMode() {
 						type="submit"
 						data-testid="chat-text-send"
 						disabled={!draftMessage.trim()}
-						className="h-11 rounded-xl bg-[var(--lilac-ink)] px-4 font-semibold text-[var(--lilac-surface)] text-xs uppercase tracking-[0.1em]"
+						className="h-11 rounded-xl bg-[var(--lilac-brand-primary)] px-4 font-semibold text-[var(--lilac-brand-primary-foreground)] text-xs uppercase tracking-[0.1em]"
 					>
 						Send
 					</Button>

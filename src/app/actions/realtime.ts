@@ -216,10 +216,7 @@ export async function createTranslateRealtimeClientSecretAction(input: unknown):
 			instructions,
 			model: parsedInput.model,
 			output_modalities: ['text'],
-			tool_choice: {
-				name: 'publish_translation',
-				type: 'function'
-			},
+			tool_choice: 'required',
 			tools: [buildPublishTranslationToolDefinition()],
 			type: 'realtime'
 		}

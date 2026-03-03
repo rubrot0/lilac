@@ -170,6 +170,38 @@ export const ResponseOutputItemAddedEventSchema = z
 	})
 	.passthrough()
 
+export const ResponseOutputItemDoneEventSchema = z
+	.object({
+		item: z
+			.object({
+				arguments: z.string().optional(),
+				id: z.string().optional(),
+				name: z.string().optional(),
+				type: z.string()
+			})
+			.passthrough(),
+		response_id: z.string().optional(),
+		type: z.literal('response.output_item.done')
+	})
+	.passthrough()
+
+export const ResponseFunctionCallArgumentsDoneEventSchema = z
+	.object({
+		arguments: z.string().optional(),
+		item: z
+			.object({
+				arguments: z.string().optional(),
+				name: z.string().optional(),
+				type: z.string().optional()
+			})
+			.passthrough()
+			.optional(),
+		name: z.string().optional(),
+		response_id: z.string().optional(),
+		type: z.literal('response.function_call_arguments.done')
+	})
+	.passthrough()
+
 const ResponseDoneFunctionCallItemSchema = z
 	.object({
 		arguments: z.string().optional(),

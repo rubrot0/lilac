@@ -26,7 +26,15 @@ const genericServerComponentErrorText =
 	'An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details.'
 const missingSessionTypeErrorText = "Missing required parameter: 'session.type'."
 const invalidItemIdErrorText = "Invalid 'item.id':"
-const trackedProtocolErrorTextList = [missingSessionTypeErrorText, invalidItemIdErrorText]
+const missingToolCallErrorTextList = [
+	'No valid publish_translation tool call was returned.',
+	'No publish_translation tool call was returned for the completed turn.'
+]
+const trackedProtocolErrorTextList = [
+	missingSessionTypeErrorText,
+	invalidItemIdErrorText,
+	...missingToolCallErrorTextList
+]
 
 const mobileViewports = [
 	{ height: 812, width: 375 },

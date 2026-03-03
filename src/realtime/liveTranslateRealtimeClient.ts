@@ -8,7 +8,9 @@ import {
 	PublishTranslationToolArgumentsSchema,
 	RealtimeBaseServerEventSchema,
 	RealtimeErrorEventSchema,
-	ResponseDoneEventSchema
+	ResponseDoneEventSchema,
+	ResponseFunctionCallArgumentsDoneEventSchema,
+	ResponseOutputItemDoneEventSchema
 } from '@/realtime/schemas'
 import type { UtteranceDirection } from '@/realtime/sessionTypes'
 
@@ -113,11 +115,8 @@ function buildPublishTranslationToolDefinition(): Record<string, unknown> {
 	}
 }
 
-function buildToolChoice(): Record<string, string> {
-	return {
-		name: 'publish_translation',
-		type: 'function'
-	}
+function buildToolChoice(): 'required' {
+	return 'required'
 }
 
 function parseStringValue(value: unknown): string | null {
@@ -129,6 +128,7 @@ function parseStringValue(value: unknown): string | null {
 
 export class LiveTranslateRealtimeClient {
 	private callbacks: LiveTranslateRealtimeClientCallbacks
+	private completedToolArgumentsByResponseId = new Map<string, string>()
 	private dataChannel: null | RTCDataChannel = null
 	private generation = 0
 	private localAudioStream: MediaStream | null = null
@@ -226,6 +226,7 @@ export class LiveTranslateRealtimeClient {
 
 	public stop(): void {
 		this.generation += 1
+		this.completedToolArgumentsByResponseId.clear()
 		this.pendingResponseContextByRequestId.clear()
 		this.sourceItemOrder = []
 
@@ -352,6 +353,7 @@ export class LiveTranslateRealtimeClient {
 	private handleResponseDoneEvent(event: ReturnType<typeof ResponseDoneEventSchema.parse>): void {
 		const response = event.response
 		if (!response) return
+		const responseStatus = parseStringValue(response.status)?.toLowerCase() ?? null
 
 		const metadata = response.metadata ?? {}
 		const requestId = parseStringValue(metadata.request_id)
@@ -372,10 +374,16 @@ export class LiveTranslateRealtimeClient {
 		const functionCall = (response.output ?? []).find(
 			item => item.type === 'function_call' && item.name === 'publish_translation'
 		)
-
 		const responseId = response.id
+		const fallbackToolArguments = responseId
+			? (this.completedToolArgumentsByResponseId.get(responseId) ?? null)
+			: null
+		if (responseId) this.completedToolArgumentsByResponseId.delete(responseId)
+		const toolArguments =
+			typeof functionCall?.arguments === 'string' ? functionCall.arguments : fallbackToolArguments
 
-		if (!functionCall || typeof functionCall.arguments !== 'string') {
+		if (!toolArguments) {
+			if (responseStatus && responseStatus !== 'completed') return
 			this.callbacks.onResultPatch({
 				direction: 'primary_to_secondary',
 				inputOrigin,
@@ -384,14 +392,14 @@ export class LiveTranslateRealtimeClient {
 				sourceText: '',
 				status: 'error',
 				targetLanguageCode: 'und',
-				translatedText: 'No valid publish_translation tool call was returned.',
+				translatedText: 'No publish_translation tool call was returned for the completed turn.',
 				...(responseId ? { responseId } : {})
 			})
 			return
 		}
 
 		try {
-			const parsedArguments = JSON.parse(functionCall.arguments) as unknown
+			const parsedArguments = JSON.parse(toolArguments) as unknown
 			const translatedResult = PublishTranslationToolArgumentsSchema.parse(parsedArguments)
 			this.callbacks.onResultPatch({
 				direction: translatedResult.direction,
@@ -417,6 +425,38 @@ export class LiveTranslateRealtimeClient {
 				...(responseId ? { responseId } : {})
 			})
 		}
+	}
+
+	private maybeStorePublishTranslationToolArguments(
+		toolName: null | string,
+		toolArguments: null | string,
+		responseId: null | string
+	): void {
+		if (!responseId || toolName !== 'publish_translation' || !toolArguments) return
+		this.completedToolArgumentsByResponseId.set(responseId, toolArguments)
+	}
+
+	private handleResponseOutputItemDoneEvent(
+		event: ReturnType<typeof ResponseOutputItemDoneEventSchema.parse>
+	): void {
+		if (event.item.type !== 'function_call') return
+		this.maybeStorePublishTranslationToolArguments(
+			parseStringValue(event.item.name),
+			parseStringValue(event.item.arguments),
+			parseStringValue(event.response_id)
+		)
+	}
+
+	private handleResponseFunctionCallArgumentsDoneEvent(
+		event: ReturnType<typeof ResponseFunctionCallArgumentsDoneEventSchema.parse>
+	): void {
+		const toolName = parseStringValue(event.item?.name) ?? parseStringValue(event.name)
+		const toolArguments = parseStringValue(event.item?.arguments) ?? parseStringValue(event.arguments)
+		this.maybeStorePublishTranslationToolArguments(
+			toolName,
+			toolArguments,
+			parseStringValue(event.response_id)
+		)
 	}
 
 	private handleServerEvent(rawData: unknown): void {
@@ -456,6 +496,16 @@ export class LiveTranslateRealtimeClient {
 						status: 'final',
 						text: event.transcript
 					})
+					return
+				}
+				case 'response.output_item.done': {
+					const event = ResponseOutputItemDoneEventSchema.parse(candidate)
+					this.handleResponseOutputItemDoneEvent(event)
+					return
+				}
+				case 'response.function_call_arguments.done': {
+					const event = ResponseFunctionCallArgumentsDoneEventSchema.parse(candidate)
+					this.handleResponseFunctionCallArgumentsDoneEvent(event)
 					return
 				}
 				case 'response.done': {

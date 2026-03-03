@@ -235,7 +235,7 @@ export default function TranslateMode() {
 						type="submit"
 						data-testid="translate-text-send"
 						disabled={!draftMessage.trim()}
-						className="h-11 rounded-xl bg-[var(--lilac-ink)] px-4 font-semibold text-[var(--lilac-surface)] text-xs uppercase tracking-[0.1em]"
+						className="h-11 rounded-xl bg-[var(--lilac-brand-primary)] px-4 font-semibold text-[var(--lilac-brand-primary-foreground)] text-xs uppercase tracking-[0.1em]"
 					>
 						Send
 					</Button>

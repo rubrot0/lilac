@@ -14,7 +14,9 @@
 	--lilac-ink-muted: rgba(53, 32, 73, 0.66);
 	--lilac-border: color-mix(in oklab, #352049 18%, transparent);
 	--lilac-border-strong: color-mix(in oklab, #352049 32%, transparent);
-	--lilac-direction-primary: #0f8a78;
+	--lilac-brand-primary: #1f3055;
+	--lilac-brand-primary-foreground: #f7f3e7;
+	--lilac-direction-primary: #5f43be;
 	--lilac-direction-secondary: #2f6dd8;
 
 	--background: var(--lilac-surface);
@@ -23,8 +25,8 @@
 	--card-foreground: var(--lilac-ink);
 	--popover: var(--lilac-card);
 	--popover-foreground: var(--lilac-ink);
-	--primary: var(--lilac-ink);
-	--primary-foreground: var(--lilac-surface);
+	--primary: var(--lilac-brand-primary);
+	--primary-foreground: var(--lilac-brand-primary-foreground);
 	--secondary: var(--lilac-elevated);
 	--secondary-foreground: var(--lilac-ink);
 	--muted: var(--lilac-card-muted);
@@ -37,14 +39,14 @@
 	--input: var(--lilac-border-strong);
 	--ring: color-mix(in oklab, var(--lilac-direction-secondary) 62%, white 38%);
 	--chart-1: #2f6dd8;
-	--chart-2: #0f8a78;
+	--chart-2: #5f43be;
 	--chart-3: #6c3db5;
 	--chart-4: #cb7f11;
 	--chart-5: #bf1e69;
 	--sidebar: var(--lilac-card);
 	--sidebar-foreground: var(--lilac-ink);
-	--sidebar-primary: var(--lilac-ink);
-	--sidebar-primary-foreground: var(--lilac-surface);
+	--sidebar-primary: var(--lilac-brand-primary);
+	--sidebar-primary-foreground: var(--lilac-brand-primary-foreground);
 	--sidebar-accent: var(--lilac-card-muted);
 	--sidebar-accent-foreground: var(--lilac-ink);
 	--sidebar-border: var(--lilac-border);
@@ -61,8 +63,10 @@
 		--lilac-ink-muted: rgba(246, 241, 255, 0.72);
 		--lilac-border: color-mix(in oklab, #f6f1ff 22%, transparent);
 		--lilac-border-strong: color-mix(in oklab, #f6f1ff 36%, transparent);
-		--lilac-direction-primary: #2cc7b2;
-		--lilac-direction-secondary: #6ea8ff;
+		--lilac-brand-primary: #5d47af;
+		--lilac-brand-primary-foreground: #f8f4ff;
+		--lilac-direction-primary: #8b71e6;
+		--lilac-direction-secondary: #7caeff;
 
 		--background: var(--lilac-surface);
 		--foreground: var(--lilac-ink);
@@ -70,8 +74,8 @@
 		--card-foreground: var(--lilac-ink);
 		--popover: var(--lilac-card);
 		--popover-foreground: var(--lilac-ink);
-		--primary: #f6f1ff;
-		--primary-foreground: #1c122b;
+		--primary: var(--lilac-brand-primary);
+		--primary-foreground: var(--lilac-brand-primary-foreground);
 		--secondary: var(--lilac-elevated);
 		--secondary-foreground: var(--lilac-ink);
 		--muted: var(--lilac-card-muted);
@@ -85,8 +89,8 @@
 		--ring: color-mix(in oklab, var(--lilac-direction-secondary) 62%, white 38%);
 		--sidebar: var(--lilac-card);
 		--sidebar-foreground: var(--lilac-ink);
-		--sidebar-primary: var(--lilac-ink);
-		--sidebar-primary-foreground: var(--lilac-surface);
+		--sidebar-primary: var(--lilac-brand-primary);
+		--sidebar-primary-foreground: var(--lilac-brand-primary-foreground);
 		--sidebar-accent: var(--lilac-card-muted);
 		--sidebar-accent-foreground: var(--lilac-ink);
 		--sidebar-border: var(--lilac-border);

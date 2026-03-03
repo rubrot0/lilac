@@ -83,14 +83,14 @@ export default function ModeShell() {
 								<TabsTrigger
 									value="chat"
 									data-testid="mode-tab-chat"
-									className="rounded-xl font-semibold text-[11px] uppercase tracking-[0.12em] data-[state=active]:bg-[var(--lilac-ink)] data-[state=active]:text-[var(--lilac-surface)]"
+									className="rounded-xl font-semibold text-[11px] uppercase tracking-[0.12em] data-[state=active]:bg-[var(--lilac-brand-primary)] data-[state=active]:text-[var(--lilac-brand-primary-foreground)]"
 								>
 									Chat
 								</TabsTrigger>
 								<TabsTrigger
 									value="translate"
 									data-testid="mode-tab-translate"
-									className="rounded-xl font-semibold text-[11px] uppercase tracking-[0.12em] data-[state=active]:bg-[var(--lilac-ink)] data-[state=active]:text-[var(--lilac-surface)]"
+									className="rounded-xl font-semibold text-[11px] uppercase tracking-[0.12em] data-[state=active]:bg-[var(--lilac-brand-primary)] data-[state=active]:text-[var(--lilac-brand-primary-foreground)]"
 								>
 									Live
 								</TabsTrigger>
@@ -115,7 +115,7 @@ export default function ModeShell() {
 							type="button"
 							data-testid="clear-mode-history"
 							variant="outline"
-							className="h-9 rounded-xl border-[var(--lilac-border)] bg-[var(--lilac-elevated)] font-semibold text-[11px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]"
+							className="h-9 rounded-xl border-[var(--lilac-border)] bg-[var(--lilac-elevated)] font-semibold text-[11px] text-[var(--lilac-ink)] uppercase tracking-[0.12em]"
 							onClick={clearCurrentModeHistory}
 						>
 							Clear
@@ -123,7 +123,7 @@ export default function ModeShell() {
 						<Button
 							type="button"
 							data-testid="reconnect-mode"
-							className="h-9 rounded-xl bg-[var(--lilac-ink)] px-4 font-semibold text-[11px] text-[var(--lilac-surface)] uppercase tracking-[0.12em]"
+							className="h-9 rounded-xl bg-[var(--lilac-brand-primary)] px-4 font-semibold text-[11px] text-[var(--lilac-brand-primary-foreground)] uppercase tracking-[0.12em]"
 							onClick={reconnectCurrentMode}
 						>
 							Reconnect
