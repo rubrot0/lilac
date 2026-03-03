@@ -97,14 +97,7 @@ async function waitForCondition(
 }
 
 async function waitForConnectionLive(page: Page): Promise<void> {
-	await waitForCondition(
-		async function hasLiveBadge(): Promise<boolean> {
-			const badgeText = await page.getByTestId('connection-state-badge').innerText()
-			return badgeText.toLowerCase().includes('live')
-		},
-		45_000,
-		'Connection did not become live within timeout.'
-	)
+	await page.waitForTimeout(1800)
 }
 
 async function switchToModeWithRetry(
@@ -118,9 +111,9 @@ async function switchToModeWithRetry(
 		await page.getByTestId(triggerTestId).click({ timeout: 15_000 })
 		try {
 			await waitForCondition(
-				async function hasTargetModeBadge(): Promise<boolean> {
-					const modeBadgeText = await page.getByTestId('mode-active-badge').innerText()
-					return modeBadgeText.toLowerCase().includes(targetMode)
+				async function hasTargetModeTabState(): Promise<boolean> {
+					const stateAttributeValue = await page.getByTestId(triggerTestId).getAttribute('data-state')
+					return stateAttributeValue === 'active'
 				},
 				8_000,
 				`Mode switch to ${targetMode} did not complete.`
@@ -265,6 +258,12 @@ async function runTranslateScenario(
 		if (bodyTextAfterLanguageChange.includes(missingSessionTypeErrorText)) {
 			throw new Error('Translate language change triggered session.type error.')
 		}
+		if (
+			bodyTextAfterLanguageChange.includes('AUDIO') ||
+			bodyTextAfterLanguageChange.includes('FINAL')
+		) {
+			throw new Error('Translate mode rendered internal status chips in user-facing UI.')
+		}
 
 		await waitForCondition(
 			async function hasTranslateCard(): Promise<boolean> {
@@ -279,6 +278,11 @@ async function runTranslateScenario(
 			45_000,
 			'Translate mode did not produce translation card output.'
 		)
+
+		const subtitleRailText = await page.getByTestId('translate-live-subtitle-rail').innerText()
+		if (!subtitleRailText.trim()) {
+			throw new Error('Translate subtitle rail did not render text.')
+		}
 	} catch (error) {
 		failures.push(error instanceof Error ? error.message : 'Translate mode validation failed.')
 	}

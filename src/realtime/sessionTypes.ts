@@ -11,11 +11,25 @@ export type ChatOutputSettings = {
 }
 
 export type TranslateSettings = {
-	primaryLanguageCode: string
-	secondaryLanguageCode: string
+	myLanguageCode: string
+	translateToLanguageCode: string
 }
 
-export type UtteranceDirection = 'primary_to_secondary' | 'secondary_to_primary'
+export type LanguageCatalogEntry = {
+	code: string
+	label: string
+	nativeLabel?: string
+	popular: boolean
+}
+
+export type LiveSubtitleState = {
+	activeSegmentId: null | string
+	isListening: boolean
+	text: string
+	updatedAt: number
+}
+
+export type UtteranceDirection = 'my_to_target' | 'target_to_my'
 
 export type UtteranceStatus = 'streaming' | 'translating' | 'final' | 'error'
 
@@ -49,30 +63,4 @@ export type ChatTranscriptMessage = {
 	status: ChatTranscriptStatus
 	source: ChatTranscriptSource
 	createdAt: number
-}
-
-export const languageOptions = [
-	{ code: 'en', label: 'English' },
-	{ code: 'es', label: 'Spanish' },
-	{ code: 'fr', label: 'French' },
-	{ code: 'de', label: 'German' },
-	{ code: 'it', label: 'Italian' },
-	{ code: 'pt', label: 'Portuguese' },
-	{ code: 'zh', label: 'Chinese' },
-	{ code: 'ja', label: 'Japanese' },
-	{ code: 'ko', label: 'Korean' },
-	{ code: 'ar', label: 'Arabic' },
-	{ code: 'hi', label: 'Hindi' },
-	{ code: 'ru', label: 'Russian' }
-] as const
-
-export function isKnownLanguageCode(languageCode: string): boolean {
-	return languageOptions.some(option => option.code === languageCode)
-}
-
-export function normalizeLanguageCode(languageCode: string, fallbackLanguageCode: string): string {
-	const normalizedCode = languageCode.trim().toLowerCase()
-	if (!normalizedCode) return fallbackLanguageCode
-	if (!isKnownLanguageCode(normalizedCode)) return fallbackLanguageCode
-	return normalizedCode
 }

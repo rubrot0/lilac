@@ -10,7 +10,6 @@ import {
 	DialogTitle,
 	DialogTrigger
 } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
 	Sheet,
@@ -349,7 +348,7 @@ export default function ChatMode() {
 						{chatTranscripts.map(message => {
 							const isUser = message.role === 'user'
 							const bubbleBaseClasses =
-								'max-w-[92%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed'
+								'max-w-[92%] whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-sm leading-relaxed'
 							const bubbleClasses = isUser
 								? `${bubbleBaseClasses} self-end bg-[var(--lilac-brand-primary)] text-[var(--lilac-brand-primary-foreground)]`
 								: `${bubbleBaseClasses} self-start border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] text-[var(--lilac-ink)]`
@@ -392,14 +391,20 @@ export default function ChatMode() {
 					submitMessage()
 				}}
 			>
-				<div className="flex items-center gap-2">
-					<Input
-						type="text"
+				<div className="flex items-end gap-2">
+					<Textarea
 						value={draftMessage}
 						data-testid="chat-text-input"
 						onChange={event => setDraftMessage(event.target.value)}
+						onKeyDown={event => {
+							if (event.key !== 'Enter') return
+							if (event.shiftKey) return
+							event.preventDefault()
+							submitMessage()
+						}}
 						placeholder="Type a message"
-						className="h-11 border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] text-[var(--lilac-ink)]"
+						aria-label="Chat message"
+						className="max-h-36 min-h-11 resize-none border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] text-[var(--lilac-ink)]"
 					/>
 					<Button
 						type="submit"
@@ -410,6 +415,9 @@ export default function ChatMode() {
 						Send
 					</Button>
 				</div>
+				<p className="pt-2 text-[var(--lilac-ink-muted)] text-xs">
+					Enter to send, Shift+Enter for newline.
+				</p>
 			</form>
 		</div>
 	)

@@ -4,6 +4,8 @@ import { defaultTranscriptionModel } from '@/realtime/modelConfig'
 import {
 	CreateRealtimeClientSecretActionInputSchema,
 	CreateRealtimeClientSecretActionOutputSchema,
+	CreateRealtimeTranscriptionSessionActionInputSchema,
+	CreateRealtimeTranscriptionSessionActionOutputSchema,
 	CreateTranslateRealtimeClientSecretActionInputSchema,
 	CreateTranslateRealtimeClientSecretActionOutputSchema,
 	parseClientSecretResponse
@@ -90,13 +92,14 @@ async function postOpenAi(path: string, body: unknown): Promise<unknown> {
 }
 
 function createTranslateInstructions(
-	primaryLanguageCode: string,
-	secondaryLanguageCode: string
+	myLanguageCode: string,
+	translateToLanguageCode: string
 ): string {
 	return [
 		'You are Lilac, a deterministic live translator.',
-		`Allowed language pair: ${primaryLanguageCode} and ${secondaryLanguageCode}.`,
-		'For each user utterance, detect source language within the pair and translate to the opposite language.',
+		`My language: ${myLanguageCode}.`,
+		`Translate to language: ${translateToLanguageCode}.`,
+		'For each user utterance, detect whether it is in my language or the target language, and translate to the opposite side.',
 		'Always call publish_translation exactly once per utterance.',
 		'Never produce assistant text outside the function call.',
 		'Preserve speaker intent, tone, and named entities.',
@@ -112,7 +115,7 @@ function buildPublishTranslationToolDefinition(): Record<string, unknown> {
 			additionalProperties: false,
 			properties: {
 				direction: {
-					enum: ['primary_to_secondary', 'secondary_to_primary'],
+					enum: ['my_to_target', 'target_to_my'],
 					type: 'string'
 				},
 				sourceLanguageCode: {
@@ -188,8 +191,8 @@ export async function createTranslateRealtimeClientSecretAction(input: unknown):
 }> {
 	const parsedInput = CreateTranslateRealtimeClientSecretActionInputSchema.parse(input)
 	const instructions = createTranslateInstructions(
-		parsedInput.primaryLanguageCode,
-		parsedInput.secondaryLanguageCode
+		parsedInput.myLanguageCode,
+		parsedInput.translateToLanguageCode
 	)
 
 	const payload = await postOpenAi('/realtime/client_secrets', {
@@ -198,21 +201,6 @@ export async function createTranslateRealtimeClientSecretAction(input: unknown):
 			seconds: 600
 		},
 		session: {
-			audio: {
-				input: {
-					noise_reduction: {
-						type: 'near_field'
-					},
-					transcription: {
-						model: defaultTranscriptionModel
-					},
-					turn_detection: {
-						create_response: false,
-						interrupt_response: false,
-						type: 'semantic_vad'
-					}
-				}
-			},
 			instructions,
 			model: parsedInput.model,
 			output_modalities: ['text'],
@@ -224,4 +212,26 @@ export async function createTranslateRealtimeClientSecretAction(input: unknown):
 
 	const parsedSecret = parseClientSecretResponse(payload)
 	return CreateTranslateRealtimeClientSecretActionOutputSchema.parse(parsedSecret)
+}
+
+export async function createRealtimeTranscriptionSessionAction(input: unknown): Promise<{
+	expiresAt: number
+	value: string
+}> {
+	const parsedInput = CreateRealtimeTranscriptionSessionActionInputSchema.parse(input)
+
+	const payload = await postOpenAi('/realtime/transcription_sessions', {
+		input_audio_format: 'pcm16',
+		input_audio_transcription: {
+			model: defaultTranscriptionModel,
+			prompt: `Likely conversation languages: ${parsedInput.myLanguageCode} and ${parsedInput.translateToLanguageCode}. Keep proper nouns and punctuation.`
+		},
+		turn_detection: {
+			eagerness: 'high',
+			type: 'semantic_vad'
+		}
+	})
+
+	const parsedSecret = parseClientSecretResponse(payload)
+	return CreateRealtimeTranscriptionSessionActionOutputSchema.parse(parsedSecret)
 }

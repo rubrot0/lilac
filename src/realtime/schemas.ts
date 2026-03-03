@@ -1,20 +1,19 @@
 import { z } from 'zod'
-
+import { isValidLanguageCode, normalizeLanguageCode } from '@/realtime/languageCatalog'
 import {
 	ChatRealtimeModelSchema,
 	defaultChatRealtimeModel,
 	defaultTranscriptionModel
 } from '@/realtime/modelConfig'
-import { languageOptions } from '@/realtime/sessionTypes'
-
-const languageCodeValues = languageOptions.map(option => option.code)
 
 export const LanguageCodeSchema = z
 	.string()
 	.min(2)
-	.transform(value => value.trim().toLowerCase())
-
-const KnownLanguageCodeSchema = z.enum(languageCodeValues as [string, ...string[]])
+	.max(35)
+	.transform(value => normalizeLanguageCode(value))
+	.refine(value => isValidLanguageCode(value), {
+		message: 'Expected a valid language code (BCP-47 style).'
+	})
 
 const RealtimeClientSecretSchema = z.object({
 	expires_at: z.number(),
@@ -49,8 +48,8 @@ export const CreateRealtimeClientSecretActionOutputSchema = z.object({
 
 export const CreateTranslateRealtimeClientSecretActionInputSchema = z.object({
 	model: ChatRealtimeModelSchema.default(defaultChatRealtimeModel),
-	primaryLanguageCode: KnownLanguageCodeSchema,
-	secondaryLanguageCode: KnownLanguageCodeSchema
+	myLanguageCode: LanguageCodeSchema,
+	translateToLanguageCode: LanguageCodeSchema
 })
 
 export const CreateTranslateRealtimeClientSecretActionOutputSchema = z.object({
@@ -58,8 +57,18 @@ export const CreateTranslateRealtimeClientSecretActionOutputSchema = z.object({
 	value: z.string().min(1)
 })
 
+export const CreateRealtimeTranscriptionSessionActionInputSchema = z.object({
+	myLanguageCode: LanguageCodeSchema,
+	translateToLanguageCode: LanguageCodeSchema
+})
+
+export const CreateRealtimeTranscriptionSessionActionOutputSchema = z.object({
+	expiresAt: z.number(),
+	value: z.string().min(1)
+})
+
 export const PublishTranslationToolArgumentsSchema = z.object({
-	direction: z.enum(['primary_to_secondary', 'secondary_to_primary']),
+	direction: z.enum(['my_to_target', 'target_to_my']),
 	sourceLanguageCode: LanguageCodeSchema,
 	sourceText: z.string().min(1),
 	targetLanguageCode: LanguageCodeSchema,
@@ -89,6 +98,18 @@ export const InputAudioBufferCommittedEventSchema = z
 		item_id: z.string(),
 		previous_item_id: z.string().nullable().optional(),
 		type: z.literal('input_audio_buffer.committed')
+	})
+	.passthrough()
+
+export const InputAudioBufferSpeechStartedEventSchema = z
+	.object({
+		type: z.literal('input_audio_buffer.speech_started')
+	})
+	.passthrough()
+
+export const InputAudioBufferSpeechStoppedEventSchema = z
+	.object({
+		type: z.literal('input_audio_buffer.speech_stopped')
 	})
 	.passthrough()
 

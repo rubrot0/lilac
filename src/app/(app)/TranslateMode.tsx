@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { ArrowRightLeft } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -13,24 +13,133 @@ import {
 	SelectTrigger,
 	SelectValue
 } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
+import {
+	languageCatalog,
+	popularLanguageCatalog,
+	resolveLanguageCode,
+	resolveLanguageLabel
+} from '@/realtime/languageCatalog'
 import { useLilacModeRuntime } from '@/realtime/modeRuntimeStore'
-import { languageOptions } from '@/realtime/sessionTypes'
+
+function buildLanguageList(): Array<{ code: string; label: string }> {
+	const popularCodeSet = new Set(popularLanguageCatalog.map(language => language.code.toLowerCase()))
+	const popularLanguageList = popularLanguageCatalog.map(language => ({
+		code: language.code,
+		label: language.label
+	}))
+	const standardLanguageList = languageCatalog
+		.filter(language => !popularCodeSet.has(language.code.toLowerCase()))
+		.map(language => ({
+			code: language.code,
+			label: language.label
+		}))
+		.sort((left, right) => left.label.localeCompare(right.label))
+	return [...popularLanguageList, ...standardLanguageList]
+}
+
+const orderedLanguageList = buildLanguageList()
+
+type LanguageSelectProps = {
+	customCodeDraft: string
+	label: string
+	onChange: (nextLanguageCode: string) => void
+	onCustomCodeDraftChange: (value: string) => void
+	testId: string
+	value: string
+}
+
+function LanguageSelect({
+	customCodeDraft,
+	label,
+	onChange,
+	onCustomCodeDraftChange,
+	testId,
+	value
+}: LanguageSelectProps) {
+	const knownCodeSet = useMemo(
+		() => new Set(orderedLanguageList.map(languageOption => languageOption.code)),
+		[]
+	)
+	const selectValue = knownCodeSet.has(value) ? value : '__custom__'
+
+	function applyCustomCodeDraft(): void {
+		const resolvedLanguageCode = resolveLanguageCode(customCodeDraft, value)
+		onChange(resolvedLanguageCode)
+		onCustomCodeDraftChange(resolvedLanguageCode)
+	}
+
+	return (
+		<div className="space-y-2">
+			<div className="font-semibold text-[11px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
+				{label}
+			</div>
+			<Select
+				value={selectValue}
+				onValueChange={nextValue => {
+					if (nextValue === '__custom__') return
+					onChange(nextValue)
+				}}
+			>
+				<SelectTrigger
+					className="h-11 border-[var(--lilac-border)] bg-[var(--lilac-card-muted)]"
+					data-testid={testId}
+				>
+					<SelectValue />
+				</SelectTrigger>
+				<SelectContent className="max-h-[50dvh]">
+					{orderedLanguageList.map(languageOption => (
+						<SelectItem key={languageOption.code} value={languageOption.code}>
+							{languageOption.label}
+						</SelectItem>
+					))}
+					<SelectItem value="__custom__">Custom code</SelectItem>
+				</SelectContent>
+			</Select>
+			<Input
+				value={customCodeDraft}
+				onChange={event => onCustomCodeDraftChange(event.target.value)}
+				onBlur={applyCustomCodeDraft}
+				onKeyDown={event => {
+					if (event.key !== 'Enter') return
+					event.preventDefault()
+					applyCustomCodeDraft()
+				}}
+				placeholder="Any language code (e.g., uk, yue, pt-BR)"
+				className="h-10 border-[var(--lilac-border)] bg-[var(--lilac-card-muted)]"
+				aria-label={`${label} custom language code`}
+			/>
+		</div>
+	)
+}
 
 export default function TranslateMode() {
 	const {
 		getDirectionColor,
+		liveSubtitleState,
 		setTranslateSettings,
 		submitTranslateTextInput,
 		translateCards,
-		translateSettings,
-		voiceInputEnabled
+		translateSettings
 	} = useLilacModeRuntime()
 
 	const [draftMessage, setDraftMessage] = useState('')
+	const [myLanguageCodeDraft, setMyLanguageCodeDraft] = useState(translateSettings.myLanguageCode)
+	const [translateToLanguageCodeDraft, setTranslateToLanguageCodeDraft] = useState(
+		translateSettings.translateToLanguageCode
+	)
 	const stayPinnedToBottomRef = useRef(true)
 	const transcriptScrollAreaRef = useRef<HTMLDivElement | null>(null)
 	const transcriptViewportRef = useRef<HTMLDivElement | null>(null)
 	const translateCardCount = translateCards.length
+
+	useEffect(() => {
+		setMyLanguageCodeDraft(translateSettings.myLanguageCode)
+	}, [translateSettings.myLanguageCode])
+
+	useEffect(() => {
+		setTranslateToLanguageCodeDraft(translateSettings.translateToLanguageCode)
+	}, [translateSettings.translateToLanguageCode])
 
 	useEffect(() => {
 		const rootElement = transcriptScrollAreaRef.current
@@ -69,77 +178,105 @@ export default function TranslateMode() {
 		setDraftMessage('')
 	}
 
+	function updateMyLanguage(nextLanguageCode: string): void {
+		const resolvedMyLanguageCode = resolveLanguageCode(
+			nextLanguageCode,
+			translateSettings.myLanguageCode
+		)
+		let resolvedTranslateToLanguageCode = translateSettings.translateToLanguageCode
+		if (resolvedMyLanguageCode === resolvedTranslateToLanguageCode) {
+			resolvedTranslateToLanguageCode = translateSettings.myLanguageCode
+		}
+		setTranslateSettings({
+			myLanguageCode: resolvedMyLanguageCode,
+			translateToLanguageCode: resolvedTranslateToLanguageCode
+		})
+	}
+
+	function updateTranslateToLanguage(nextLanguageCode: string): void {
+		const resolvedTranslateToLanguageCode = resolveLanguageCode(
+			nextLanguageCode,
+			translateSettings.translateToLanguageCode
+		)
+		let resolvedMyLanguageCode = translateSettings.myLanguageCode
+		if (resolvedMyLanguageCode === resolvedTranslateToLanguageCode) {
+			resolvedMyLanguageCode = translateSettings.translateToLanguageCode
+		}
+		setTranslateSettings({
+			myLanguageCode: resolvedMyLanguageCode,
+			translateToLanguageCode: resolvedTranslateToLanguageCode
+		})
+	}
+
+	function swapLanguages(): void {
+		setTranslateSettings({
+			myLanguageCode: translateSettings.translateToLanguageCode,
+			translateToLanguageCode: translateSettings.myLanguageCode
+		})
+	}
+
+	const pairSummary = `${resolveLanguageLabel(translateSettings.myLanguageCode)} ↔ ${resolveLanguageLabel(
+		translateSettings.translateToLanguageCode
+	)}`
+
 	return (
-		<div className="flex min-h-0 flex-1 flex-col gap-3">
-			<div className="grid gap-3 rounded-2xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] p-3 sm:grid-cols-2">
-				<div className="space-y-2">
-					<span className="font-semibold text-[11px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
-						Primary language
-					</span>
-					<Select
-						value={translateSettings.primaryLanguageCode}
-						onValueChange={nextPrimary => {
-							const nextSecondary =
-								nextPrimary === translateSettings.secondaryLanguageCode
-									? translateSettings.primaryLanguageCode
-									: translateSettings.secondaryLanguageCode
-							setTranslateSettings({
-								primaryLanguageCode: nextPrimary,
-								secondaryLanguageCode: nextSecondary
-							})
-						}}
+		<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
+			<div className="space-y-3 rounded-2xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] p-3">
+				<div className="flex items-center justify-between gap-3">
+					<div>
+						<div className="font-semibold text-[11px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
+							Language Pair
+						</div>
+						<p className="font-medium text-[var(--lilac-ink)] text-sm">{pairSummary}</p>
+					</div>
+					<Button
+						type="button"
+						variant="outline"
+						onClick={swapLanguages}
+						className="rounded-full border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] px-3"
+						aria-label="Swap language pair"
 					>
-						<SelectTrigger
-							className="h-11 border-[var(--lilac-border)] bg-[var(--lilac-card-muted)]"
-							data-testid="translate-primary-language"
-						>
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{languageOptions.map(option => (
-								<SelectItem key={option.code} value={option.code}>
-									{option.label}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
+						<ArrowRightLeft className="h-4 w-4" />
+					</Button>
 				</div>
 
-				<div className="space-y-2">
-					<span className="font-semibold text-[11px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
-						Secondary language
-					</span>
-					<Select
-						value={translateSettings.secondaryLanguageCode}
-						onValueChange={nextSecondary => {
-							const nextPrimary =
-								nextSecondary === translateSettings.primaryLanguageCode
-									? translateSettings.secondaryLanguageCode
-									: translateSettings.primaryLanguageCode
-							setTranslateSettings({
-								primaryLanguageCode: nextPrimary,
-								secondaryLanguageCode: nextSecondary
-							})
-						}}
-					>
-						<SelectTrigger
-							className="h-11 border-[var(--lilac-border)] bg-[var(--lilac-card-muted)]"
-							data-testid="translate-secondary-language"
-						>
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{languageOptions.map(option => (
-								<SelectItem key={option.code} value={option.code}>
-									{option.label}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
+				<div className="grid gap-3 sm:grid-cols-2">
+					<LanguageSelect
+						customCodeDraft={myLanguageCodeDraft}
+						label="I Speak"
+						onChange={updateMyLanguage}
+						onCustomCodeDraftChange={setMyLanguageCodeDraft}
+						testId="translate-primary-language"
+						value={translateSettings.myLanguageCode}
+					/>
+					<LanguageSelect
+						customCodeDraft={translateToLanguageCodeDraft}
+						label="Translate To"
+						onChange={updateTranslateToLanguage}
+						onCustomCodeDraftChange={setTranslateToLanguageCodeDraft}
+						testId="translate-secondary-language"
+						value={translateSettings.translateToLanguageCode}
+					/>
 				</div>
+			</div>
 
-				<p className="text-[var(--lilac-ink-muted)] text-xs sm:col-span-2">
-					Voice input is {voiceInputEnabled ? 'enabled' : 'disabled'} globally.
+			<div
+				className="rounded-2xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-3 py-2"
+				data-testid="translate-live-subtitle-rail"
+				aria-live="polite"
+			>
+				<div className="flex items-center gap-2 font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.14em]">
+					<span
+						className={`inline-flex h-2 w-2 rounded-full ${
+							liveSubtitleState.isListening
+								? 'animate-pulse bg-[var(--lilac-direction-secondary)]'
+								: 'bg-[var(--lilac-border-strong)]'
+						}`}
+					/>
+					{liveSubtitleState.isListening ? 'Listening…' : 'Listening paused'}
+				</div>
+				<p className="min-h-6 whitespace-pre-wrap break-words pt-1 text-[var(--lilac-ink)] text-sm">
+					{liveSubtitleState.text || 'Live subtitles appear here while people speak.'}
 				</p>
 			</div>
 
@@ -150,67 +287,71 @@ export default function TranslateMode() {
 			>
 				{translateCards.length ? (
 					<div className="flex flex-col gap-3 p-3 sm:p-4">
-						{translateCards.map(card => (
-							<article
-								key={card.id}
-								data-testid={`translate-card-${card.id}`}
-								className="rounded-2xl border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] p-3"
-							>
-								<div className="mb-2 flex items-center justify-between gap-2">
-									<Badge
-										className="rounded-full border-none px-2 py-1 font-semibold text-[10px] text-white uppercase tracking-[0.12em]"
-										style={{ backgroundColor: getDirectionColor(card.direction) }}
-									>
-										{card.direction.replaceAll('_', ' ')}
-									</Badge>
-									<div className="flex items-center gap-2">
-										<span className="font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.14em]">
-											{card.inputOrigin}
-										</span>
-										<span
-											className="font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.14em]"
-											data-testid={`translate-card-status-${card.id}`}
+						{translateCards.map(card => {
+							const routeLabel = `${resolveLanguageLabel(card.sourceLanguageCode)} -> ${resolveLanguageLabel(
+								card.targetLanguageCode
+							)}`
+							const isTranslating = card.status === 'streaming' || card.status === 'translating'
+							return (
+								<article
+									key={card.id}
+									data-testid={`translate-card-${card.id}`}
+									className="rounded-2xl border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] p-3"
+								>
+									<div className="mb-2 flex items-center justify-between gap-2">
+										<div
+											className="font-semibold text-xs tracking-[0.06em]"
+											style={{ color: getDirectionColor(card.direction) }}
 										>
-											{card.status}
-										</span>
-									</div>
-								</div>
-
-								<div className="grid gap-2 sm:grid-cols-2">
-									<div className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-3 py-2">
-										<div className="mb-1 font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
-											{card.sourceLanguageCode}
+											{routeLabel}
 										</div>
-										<p
-											className="whitespace-pre-wrap text-[var(--lilac-ink)] text-sm leading-relaxed"
-											data-testid={`translate-card-source-${card.id}`}
-										>
-											{card.sourceText.trim() || '…'}
-										</p>
+										{isTranslating ? (
+											<div className="inline-flex items-center gap-1">
+												<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--lilac-direction-secondary)]" />
+												<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--lilac-direction-secondary)] [animation-delay:120ms]" />
+												<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--lilac-direction-secondary)] [animation-delay:240ms]" />
+											</div>
+										) : null}
 									</div>
 
-									<div className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-3 py-2">
-										<div className="mb-1 font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
-											{card.targetLanguageCode}
+									<div className="space-y-2">
+										<div className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-3 py-2">
+											<div className="mb-1 font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
+												Heard ({resolveLanguageLabel(card.sourceLanguageCode)})
+											</div>
+											<p
+												className="whitespace-pre-wrap break-words text-[var(--lilac-ink)] text-sm leading-relaxed"
+												data-testid={`translate-card-source-${card.id}`}
+											>
+												{card.sourceText.trim() || '…'}
+											</p>
 										</div>
-										<p
-											className="whitespace-pre-wrap text-[var(--lilac-ink)] text-sm leading-relaxed"
-											data-testid={`translate-card-target-${card.id}`}
-										>
-											{card.translatedText.trim() ||
-												(card.status === 'error' ? card.errorMessage : 'Translating…')}
-										</p>
+
+										<div className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-3 py-2">
+											<div className="mb-1 font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
+												Translation ({resolveLanguageLabel(card.targetLanguageCode)})
+											</div>
+											<p
+												className="whitespace-pre-wrap break-words text-[var(--lilac-ink)] text-sm leading-relaxed"
+												data-testid={`translate-card-target-${card.id}`}
+											>
+												{card.translatedText.trim() ||
+													(card.status === 'error'
+														? (card.errorMessage ?? 'Translation failed.')
+														: 'Translating…')}
+											</p>
+										</div>
 									</div>
-								</div>
-							</article>
-						))}
+								</article>
+							)
+						})}
 					</div>
 				) : (
 					<div
 						className="flex min-h-56 items-center justify-center px-4 py-6 text-[var(--lilac-ink-muted)] text-sm"
 						data-testid="translate-empty-state"
 					>
-						Live translation cards appear here.
+						Translated subtitles appear here.
 					</div>
 				)}
 			</ScrollArea>
@@ -222,14 +363,20 @@ export default function TranslateMode() {
 					submitMessage()
 				}}
 			>
-				<div className="flex items-center gap-2">
-					<Input
-						type="text"
+				<div className="flex items-end gap-2">
+					<Textarea
 						value={draftMessage}
 						data-testid="translate-text-input"
 						onChange={event => setDraftMessage(event.target.value)}
+						onKeyDown={event => {
+							if (event.key !== 'Enter') return
+							if (event.shiftKey) return
+							event.preventDefault()
+							submitMessage()
+						}}
 						placeholder="Type text to translate"
-						className="h-11 border-[var(--lilac-border)] bg-[var(--lilac-card-muted)]"
+						aria-label="Translate text input"
+						className="max-h-36 min-h-11 resize-none border-[var(--lilac-border)] bg-[var(--lilac-card-muted)]"
 					/>
 					<Button
 						type="submit"
@@ -240,6 +387,9 @@ export default function TranslateMode() {
 						Send
 					</Button>
 				</div>
+				<p className="pt-2 text-[var(--lilac-ink-muted)] text-xs">
+					Enter to send, Shift+Enter for newline.
+				</p>
 			</form>
 		</div>
 	)

@@ -2,9 +2,6 @@
 
 import { createTranslateRealtimeClientSecretAction } from '@/app/actions/realtime'
 import {
-	InputAudioBufferCommittedEventSchema,
-	InputAudioTranscriptionCompletedEventSchema,
-	InputAudioTranscriptionDeltaEventSchema,
 	PublishTranslationToolArgumentsSchema,
 	RealtimeBaseServerEventSchema,
 	RealtimeErrorEventSchema,
@@ -16,11 +13,18 @@ import type { UtteranceDirection } from '@/realtime/sessionTypes'
 
 export type LiveTranslateRealtimeClientState = 'connecting' | 'connected' | 'disconnected' | 'error'
 
-export type LiveTranslateSourcePatch = {
+export type LiveTranslateSettings = {
+	myLanguageCode: string
+	translateToLanguageCode: string
+}
+
+export type StartLiveTranslateRealtimeClientInput = LiveTranslateSettings & {
+	model: string
+}
+
+export type TranslateInputPayload = {
 	inputOrigin: 'audio' | 'text'
 	itemId: string
-	previousItemId?: null | string
-	status: 'final' | 'streaming'
 	text: string
 }
 
@@ -36,21 +40,10 @@ export type LiveTranslateResultPatch = {
 	translatedText: string
 }
 
-export type LiveTranslateSettings = {
-	primaryLanguageCode: string
-	secondaryLanguageCode: string
-}
-
-export type StartLiveTranslateRealtimeClientInput = LiveTranslateSettings & {
-	model: string
-	voiceInputEnabled: boolean
-}
-
 export type LiveTranslateRealtimeClientCallbacks = {
 	onConnectionStateChange: (state: LiveTranslateRealtimeClientState) => void
 	onError: (message: string) => void
 	onResultPatch: (patch: LiveTranslateResultPatch) => void
-	onSourcePatch: (patch: LiveTranslateSourcePatch) => void
 }
 
 type PendingResponseContext = {
@@ -58,19 +51,17 @@ type PendingResponseContext = {
 	itemId: string
 }
 
-function createClientItemId(prefix: string): string {
-	const randomSegment = crypto.randomUUID().replaceAll('-', '').slice(0, 24)
-	return `${prefix}_${randomSegment}`
-}
-
 function createTranslateInstructions(
-	primaryLanguageCode: string,
-	secondaryLanguageCode: string
+	myLanguageCode: string,
+	translateToLanguageCode: string
 ): string {
 	return [
 		'You are Lilac, a deterministic live translator.',
-		`Allowed language pair: ${primaryLanguageCode} and ${secondaryLanguageCode}.`,
-		'For each user utterance, detect source language within the pair and translate to the opposite language.',
+		`My language: ${myLanguageCode}.`,
+		`Translate to language: ${translateToLanguageCode}.`,
+		'For each user utterance, detect whether source is my language or target language.',
+		'If source is my language, translate to target and use direction my_to_target.',
+		'If source is target language, translate to my language and use direction target_to_my.',
 		'Always call publish_translation exactly once per utterance.',
 		'Never produce assistant text outside the function call.',
 		'Preserve speaker intent, tone, and named entities.',
@@ -86,7 +77,7 @@ function buildPublishTranslationToolDefinition(): Record<string, unknown> {
 			additionalProperties: false,
 			properties: {
 				direction: {
-					enum: ['primary_to_secondary', 'secondary_to_primary'],
+					enum: ['my_to_target', 'target_to_my'],
 					type: 'string'
 				},
 				sourceLanguageCode: {
@@ -119,7 +110,7 @@ function buildToolChoice(): 'required' {
 	return 'required'
 }
 
-function parseStringValue(value: unknown): string | null {
+function parseStringValue(value: unknown): null | string {
 	if (typeof value !== 'string') return null
 	const normalizedValue = value.trim()
 	if (!normalizedValue) return null
@@ -131,10 +122,10 @@ export class LiveTranslateRealtimeClient {
 	private completedToolArgumentsByResponseId = new Map<string, string>()
 	private dataChannel: null | RTCDataChannel = null
 	private generation = 0
-	private localAudioStream: MediaStream | null = null
 	private pendingResponseContextByRequestId = new Map<string, PendingResponseContext>()
 	private peerConnection: null | RTCPeerConnection = null
 	private sourceItemOrder: string[] = []
+	private state: LiveTranslateRealtimeClientState = 'disconnected'
 
 	public constructor(callbacks: LiveTranslateRealtimeClientCallbacks) {
 		this.callbacks = callbacks
@@ -144,13 +135,13 @@ export class LiveTranslateRealtimeClient {
 		this.stop()
 		this.generation += 1
 		const generation = this.generation
-		this.callbacks.onConnectionStateChange('connecting')
+		this.setState('connecting')
 
 		try {
 			const clientSecret = await createTranslateRealtimeClientSecretAction({
 				model: input.model,
-				primaryLanguageCode: input.primaryLanguageCode,
-				secondaryLanguageCode: input.secondaryLanguageCode
+				myLanguageCode: input.myLanguageCode,
+				translateToLanguageCode: input.translateToLanguageCode
 			})
 
 			if (generation !== this.generation) return
@@ -158,34 +149,21 @@ export class LiveTranslateRealtimeClient {
 			const peerConnection = new RTCPeerConnection()
 			this.peerConnection = peerConnection
 
-			if (input.voiceInputEnabled) {
-				await this.enableVoiceInput(generation)
-			}
-
-			if (generation !== this.generation) return
-
-			const localAudioStream = this.localAudioStream
-			if (localAudioStream) {
-				for (const track of localAudioStream.getTracks()) {
-					peerConnection.addTrack(track, localAudioStream)
-				}
-			}
-
 			const dataChannel = peerConnection.createDataChannel('oai-events')
 			this.dataChannel = dataChannel
 
 			dataChannel.addEventListener('open', () => {
 				if (generation !== this.generation) return
-				this.callbacks.onConnectionStateChange('connected')
+				this.setState('connected')
 				this.updateTranslateSettings({
-					primaryLanguageCode: input.primaryLanguageCode,
-					secondaryLanguageCode: input.secondaryLanguageCode
+					myLanguageCode: input.myLanguageCode,
+					translateToLanguageCode: input.translateToLanguageCode
 				})
 			})
 
 			dataChannel.addEventListener('close', () => {
 				if (generation !== this.generation) return
-				this.callbacks.onConnectionStateChange('disconnected')
+				this.setState('disconnected')
 			})
 
 			dataChannel.addEventListener('message', event => {
@@ -216,8 +194,8 @@ export class LiveTranslateRealtimeClient {
 			await peerConnection.setRemoteDescription({ sdp: answerSdp, type: 'answer' })
 		} catch (error) {
 			if (generation !== this.generation) return
-			this.callbacks.onConnectionStateChange('error')
-			const fallbackMessage = 'Unable to start Live Translate mode.'
+			const fallbackMessage = 'Unable to start Translate mode.'
+			this.setState('error')
 			if (error instanceof Error) this.callbacks.onError(error.message || fallbackMessage)
 			else this.callbacks.onError(fallbackMessage)
 			this.stop()
@@ -239,25 +217,17 @@ export class LiveTranslateRealtimeClient {
 			this.peerConnection?.close()
 		} catch {}
 		this.peerConnection = null
-
-		for (const track of this.localAudioStream?.getTracks() ?? []) {
-			track.stop()
-		}
-		this.localAudioStream = null
-		this.callbacks.onConnectionStateChange('disconnected')
+		this.setState('disconnected')
 	}
 
-	public submitTextInput(text: string): void {
-		const normalizedText = text.trim()
+	public isConnected(): boolean {
+		return this.state === 'connected'
+	}
+
+	public submitInput(input: TranslateInputPayload): void {
+		const normalizedText = input.text.trim()
 		if (!normalizedText) return
-		const itemId = createClientItemId('typed')
-		this.registerSourceItem(itemId, null)
-		this.callbacks.onSourcePatch({
-			inputOrigin: 'text',
-			itemId,
-			status: 'final',
-			text: normalizedText
-		})
+		this.registerSourceItem(input.itemId)
 		this.sendEvent({
 			item: {
 				content: [
@@ -266,29 +236,20 @@ export class LiveTranslateRealtimeClient {
 						type: 'input_text'
 					}
 				],
-				id: itemId,
+				id: input.itemId,
 				role: 'user',
 				type: 'message'
 			},
 			type: 'conversation.item.create'
 		})
-		this.requestTranslationResponse(itemId, 'text')
+		this.requestTranslationResponse(input.itemId, input.inputOrigin)
 	}
 
 	public updateTranslateSettings(settings: LiveTranslateSettings): void {
 		this.sendSessionUpdate({
-			audio: {
-				input: {
-					turn_detection: {
-						create_response: false,
-						interrupt_response: false,
-						type: 'semantic_vad'
-					}
-				}
-			},
 			instructions: createTranslateInstructions(
-				settings.primaryLanguageCode,
-				settings.secondaryLanguageCode
+				settings.myLanguageCode,
+				settings.translateToLanguageCode
 			),
 			output_modalities: ['text'],
 			tool_choice: buildToolChoice(),
@@ -296,58 +257,18 @@ export class LiveTranslateRealtimeClient {
 		})
 	}
 
-	public async updateVoiceInputEnabled(voiceInputEnabled: boolean): Promise<void> {
-		if (!this.peerConnection) return
-		const generation = this.generation
-
-		if (!voiceInputEnabled) {
-			for (const sender of this.peerConnection.getSenders()) {
-				if (sender.track?.kind === 'audio') {
-					try {
-						this.peerConnection.removeTrack(sender)
-					} catch {}
-				}
-			}
-			for (const track of this.localAudioStream?.getTracks() ?? []) {
-				track.stop()
-			}
-			this.localAudioStream = null
-			return
-		}
-
-		const hasLocalAudioStream = this.localAudioStream !== null
-		if (hasLocalAudioStream) return
-		await this.enableVoiceInput(generation)
-		if (generation !== this.generation) return
-		const localAudioStream = this.localAudioStream
-		if (localAudioStream === null) return
-		for (const track of localAudioStream.getTracks()) {
-			this.peerConnection.addTrack(track, localAudioStream)
-		}
-	}
-
 	private buildResponseInput(itemId: string): Array<Record<string, string>> {
-		const recentItemIds = this.sourceItemOrder.slice(Math.max(0, this.sourceItemOrder.length - 8))
-		if (!recentItemIds.includes(itemId)) recentItemIds.push(itemId)
-		return recentItemIds.map(sourceItemId => ({
+		const recentItemIdList = this.sourceItemOrder.slice(Math.max(0, this.sourceItemOrder.length - 12))
+		if (!recentItemIdList.includes(itemId)) recentItemIdList.push(itemId)
+		return recentItemIdList.map(sourceItemId => ({
 			id: sourceItemId,
 			type: 'item_reference'
 		}))
 	}
 
-	private async enableVoiceInput(generation: number): Promise<void> {
-		const stream = await navigator.mediaDevices.getUserMedia({
-			audio: {
-				autoGainControl: true,
-				echoCancellation: true,
-				noiseSuppression: true
-			}
-		})
-		if (generation !== this.generation) {
-			for (const track of stream.getTracks()) track.stop()
-			return
-		}
-		this.localAudioStream = stream
+	private setState(state: LiveTranslateRealtimeClientState): void {
+		this.state = state
+		this.callbacks.onConnectionStateChange(state)
 	}
 
 	private handleResponseDoneEvent(event: ReturnType<typeof ResponseDoneEventSchema.parse>): void {
@@ -363,12 +284,11 @@ export class LiveTranslateRealtimeClient {
 		const pendingContext = requestId
 			? (this.pendingResponseContextByRequestId.get(requestId) ?? null)
 			: null
+		if (requestId) this.pendingResponseContextByRequestId.delete(requestId)
 
 		const sourceItemId = sourceItemIdFromMetadata ?? pendingContext?.itemId ?? null
 		const rawInputOrigin = inputOriginFromMetadata ?? pendingContext?.inputOrigin ?? null
 		const inputOrigin: 'audio' | 'text' = rawInputOrigin === 'text' ? 'text' : 'audio'
-
-		if (requestId) this.pendingResponseContextByRequestId.delete(requestId)
 		if (!sourceItemId) return
 
 		const functionCall = (response.output ?? []).find(
@@ -385,14 +305,14 @@ export class LiveTranslateRealtimeClient {
 		if (!toolArguments) {
 			if (responseStatus && responseStatus !== 'completed') return
 			this.callbacks.onResultPatch({
-				direction: 'primary_to_secondary',
+				direction: 'my_to_target',
 				inputOrigin,
 				itemId: sourceItemId,
 				sourceLanguageCode: 'und',
 				sourceText: '',
 				status: 'error',
 				targetLanguageCode: 'und',
-				translatedText: 'No publish_translation tool call was returned for the completed turn.',
+				translatedText: 'No valid publish_translation tool call was returned.',
 				...(responseId ? { responseId } : {})
 			})
 			return
@@ -414,7 +334,7 @@ export class LiveTranslateRealtimeClient {
 			})
 		} catch {
 			this.callbacks.onResultPatch({
-				direction: 'primary_to_secondary',
+				direction: 'my_to_target',
 				inputOrigin,
 				itemId: sourceItemId,
 				sourceLanguageCode: 'und',
@@ -465,39 +385,6 @@ export class LiveTranslateRealtimeClient {
 			const baseEvent = RealtimeBaseServerEventSchema.parse(candidate)
 
 			switch (baseEvent.type) {
-				case 'input_audio_buffer.committed': {
-					const event = InputAudioBufferCommittedEventSchema.parse(candidate)
-					this.registerSourceItem(event.item_id, event.previous_item_id ?? null)
-					this.callbacks.onSourcePatch({
-						inputOrigin: 'audio',
-						itemId: event.item_id,
-						previousItemId: event.previous_item_id ?? null,
-						status: 'streaming',
-						text: ''
-					})
-					this.requestTranslationResponse(event.item_id, 'audio')
-					return
-				}
-				case 'conversation.item.input_audio_transcription.delta': {
-					const event = InputAudioTranscriptionDeltaEventSchema.parse(candidate)
-					this.callbacks.onSourcePatch({
-						inputOrigin: 'audio',
-						itemId: event.item_id,
-						status: 'streaming',
-						text: event.delta
-					})
-					return
-				}
-				case 'conversation.item.input_audio_transcription.completed': {
-					const event = InputAudioTranscriptionCompletedEventSchema.parse(candidate)
-					this.callbacks.onSourcePatch({
-						inputOrigin: 'audio',
-						itemId: event.item_id,
-						status: 'final',
-						text: event.transcript
-					})
-					return
-				}
 				case 'response.output_item.done': {
 					const event = ResponseOutputItemDoneEventSchema.parse(candidate)
 					this.handleResponseOutputItemDoneEvent(event)
@@ -522,26 +409,15 @@ export class LiveTranslateRealtimeClient {
 					return
 			}
 		} catch {
-			// Ignore unrelated/unrecognized realtime events.
 			return
 		}
 	}
 
-	private registerSourceItem(itemId: string, previousItemId: null | string): void {
+	private registerSourceItem(itemId: string): void {
 		if (this.sourceItemOrder.includes(itemId)) return
-		if (!previousItemId) {
-			this.sourceItemOrder.push(itemId)
-			return
-		}
-
-		const previousIndex = this.sourceItemOrder.indexOf(previousItemId)
-		if (previousIndex === -1) {
-			this.sourceItemOrder.push(itemId)
-		} else {
-			this.sourceItemOrder.splice(previousIndex + 1, 0, itemId)
-		}
-		if (this.sourceItemOrder.length > 48) {
-			this.sourceItemOrder = this.sourceItemOrder.slice(this.sourceItemOrder.length - 48)
+		this.sourceItemOrder.push(itemId)
+		if (this.sourceItemOrder.length > 64) {
+			this.sourceItemOrder = this.sourceItemOrder.slice(this.sourceItemOrder.length - 64)
 		}
 	}
 

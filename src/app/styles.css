@@ -14,8 +14,8 @@
 	--lilac-ink-muted: rgba(53, 32, 73, 0.66);
 	--lilac-border: color-mix(in oklab, #352049 18%, transparent);
 	--lilac-border-strong: color-mix(in oklab, #352049 32%, transparent);
-	--lilac-brand-primary: #1f3055;
-	--lilac-brand-primary-foreground: #f7f3e7;
+	--lilac-brand-primary: #152b57;
+	--lilac-brand-primary-foreground: #f9f5ec;
 	--lilac-direction-primary: #5f43be;
 	--lilac-direction-secondary: #2f6dd8;
 
@@ -63,10 +63,10 @@
 		--lilac-ink-muted: rgba(246, 241, 255, 0.72);
 		--lilac-border: color-mix(in oklab, #f6f1ff 22%, transparent);
 		--lilac-border-strong: color-mix(in oklab, #f6f1ff 36%, transparent);
-		--lilac-brand-primary: #5d47af;
-		--lilac-brand-primary-foreground: #f8f4ff;
-		--lilac-direction-primary: #8b71e6;
-		--lilac-direction-secondary: #7caeff;
+		--lilac-brand-primary: #9584ee;
+		--lilac-brand-primary-foreground: #140f23;
+		--lilac-direction-primary: #a996ff;
+		--lilac-direction-secondary: #8cc2ff;
 
 		--background: var(--lilac-surface);
 		--foreground: var(--lilac-ink);
@@ -149,6 +149,7 @@
 html,
 body {
 	width: 100%;
+	height: 100%;
 	min-height: 100%;
 }
 
@@ -158,7 +159,7 @@ body {
 		"SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 	background: var(--lilac-surface);
 	color: var(--lilac-ink);
-	overflow-x: hidden;
+	overflow: hidden;
 	overscroll-behavior-y: contain;
 	touch-action: manipulation;
 }
