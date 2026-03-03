@@ -24,6 +24,7 @@ type ScenarioResult = {
 
 const genericServerComponentErrorText =
 	'An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details.'
+const missingSessionTypeErrorText = "Missing required parameter: 'session.type'."
 
 const mobileViewports = [
 	{ height: 812, width: 375 },
@@ -115,18 +116,73 @@ async function writeScenarioArtifacts(
 	return bodyText
 }
 
+async function clickSliderByRatio(page: Page, testId: string, ratio: number): Promise<void> {
+	const sliderLocator = page.getByTestId(testId)
+	await sliderLocator.waitFor({ state: 'visible', timeout: 15_000 })
+	const sliderBox = await sliderLocator.boundingBox()
+	if (!sliderBox) throw new Error(`Unable to locate slider bounds for ${testId}.`)
+
+	const normalizedRatio = Math.max(0, Math.min(1, ratio))
+	const clickX = sliderBox.x + sliderBox.width * normalizedRatio
+	const clickY = sliderBox.y + sliderBox.height / 2
+	await page.mouse.click(clickX, clickY)
+}
+
+async function selectByLabel(
+	page: Page,
+	triggerTestId: string,
+	optionLabel: string
+): Promise<void> {
+	await page.getByTestId(triggerTestId).click()
+	const optionByRole = page.getByRole('option', { name: optionLabel }).first()
+	if (await optionByRole.count()) {
+		await optionByRole.click()
+		return
+	}
+	await page.locator('[data-radix-collection-item]').filter({ hasText: optionLabel }).first().click()
+}
+
 async function runChatScenario(page: Page, artifactDirectoryPath: string): Promise<ScenarioResult> {
 	const failures: string[] = []
+	const typedMessage = `typed smoke ${Date.now()}`
 	try {
 		await page.getByTestId('mode-tab-chat').click()
 		await waitForConnectionLive(page)
+
+		await page.getByTestId('chat-settings-open-desktop').click()
+		await clickSliderByRatio(page, 'chat-turn-delay-slider', 0.68)
+		await page.waitForTimeout(800)
+
+		const bodyTextAfterSliderUpdate = await page.locator('body').innerText()
+		if (bodyTextAfterSliderUpdate.includes(missingSessionTypeErrorText)) {
+			throw new Error('Chat slider interaction triggered session.type error.')
+		}
+
+		await page.keyboard.press('Escape')
+		await page.getByTestId('chat-text-input').fill(typedMessage)
+		await page.getByTestId('chat-text-send').click()
+
 		await waitForCondition(
-			async function hasChatMessages(): Promise<boolean> {
-				const messageCount = await page.locator('[data-testid^="chat-message-"]').count()
-				return messageCount > 0
+			async function hasVisibleTypedMessage(): Promise<boolean> {
+				const visibleCount = await page
+					.locator('[data-testid^="chat-message-text-"]')
+					.filter({ hasText: typedMessage })
+					.count()
+				return visibleCount > 0
+			},
+			20_000,
+			'Typed chat message was not appended to visible transcript.'
+		)
+
+		await waitForCondition(
+			async function hasAssistantMessage(): Promise<boolean> {
+				const messageTextList = await page
+					.locator('[data-testid^="chat-message-text-"]')
+					.allInnerTexts()
+				return messageTextList.some(messageText => !messageText.includes(typedMessage))
 			},
 			35_000,
-			'Chat mode did not receive transcript messages.'
+			'Chat mode did not produce a follow-up assistant transcript.'
 		)
 	} catch (error) {
 		failures.push(error instanceof Error ? error.message : 'Chat mode validation failed.')
@@ -157,6 +213,14 @@ async function runTranslateScenario(
 			connectionFailureMessage =
 				error instanceof Error ? error.message : 'Translate mode connection did not become live.'
 		}
+
+		await selectByLabel(page, 'translate-secondary-language', 'French')
+		await page.waitForTimeout(1000)
+		const bodyTextAfterLanguageChange = await page.locator('body').innerText()
+		if (bodyTextAfterLanguageChange.includes(missingSessionTypeErrorText)) {
+			throw new Error('Translate language change triggered session.type error.')
+		}
+
 		await waitForCondition(
 			async function hasTranslateCard(): Promise<boolean> {
 				const cardCount = await page.locator('[data-testid^="translate-card-"]').count()
@@ -180,6 +244,9 @@ async function runTranslateScenario(
 	const bodyText = await writeScenarioArtifacts(page, artifactDirectoryPath, 'translate')
 	if (bodyText.includes(genericServerComponentErrorText)) {
 		failures.push('Translate mode rendered generic Server Components error text.')
+	}
+	if (bodyText.includes(missingSessionTypeErrorText)) {
+		failures.push('Translate mode rendered session.type protocol error text.')
 	}
 
 	return {

@@ -37,7 +37,6 @@ export type LiveTranslateResultPatch = {
 export type LiveTranslateSettings = {
 	primaryLanguageCode: string
 	secondaryLanguageCode: string
-	turnDelaySeconds: number
 }
 
 export type StartLiveTranslateRealtimeClientInput = LiveTranslateSettings & {
@@ -146,8 +145,7 @@ export class LiveTranslateRealtimeClient {
 			const clientSecret = await createTranslateRealtimeClientSecretAction({
 				model: input.model,
 				primaryLanguageCode: input.primaryLanguageCode,
-				secondaryLanguageCode: input.secondaryLanguageCode,
-				turnDelaySeconds: input.turnDelaySeconds
+				secondaryLanguageCode: input.secondaryLanguageCode
 			})
 
 			if (generation !== this.generation) return
@@ -176,8 +174,7 @@ export class LiveTranslateRealtimeClient {
 				this.callbacks.onConnectionStateChange('connected')
 				this.updateTranslateSettings({
 					primaryLanguageCode: input.primaryLanguageCode,
-					secondaryLanguageCode: input.secondaryLanguageCode,
-					turnDelaySeconds: input.turnDelaySeconds
+					secondaryLanguageCode: input.secondaryLanguageCode
 				})
 			})
 
@@ -273,26 +270,23 @@ export class LiveTranslateRealtimeClient {
 	}
 
 	public updateTranslateSettings(settings: LiveTranslateSettings): void {
-		this.sendEvent({
-			session: {
-				audio: {
-					input: {
-						turn_detection: {
-							create_response: false,
-							interrupt_response: false,
-							type: 'semantic_vad'
-						}
+		this.sendSessionUpdate({
+			audio: {
+				input: {
+					turn_detection: {
+						create_response: false,
+						interrupt_response: false,
+						type: 'semantic_vad'
 					}
-				},
-				instructions: createTranslateInstructions(
-					settings.primaryLanguageCode,
-					settings.secondaryLanguageCode
-				),
-				output_modalities: ['text'],
-				tool_choice: buildToolChoice(),
-				tools: [buildPublishTranslationToolDefinition()]
+				}
 			},
-			type: 'session.update'
+			instructions: createTranslateInstructions(
+				settings.primaryLanguageCode,
+				settings.secondaryLanguageCode
+			),
+			output_modalities: ['text'],
+			tool_choice: buildToolChoice(),
+			tools: [buildPublishTranslationToolDefinition()]
 		})
 	}
 
@@ -513,6 +507,16 @@ export class LiveTranslateRealtimeClient {
 				tools: [buildPublishTranslationToolDefinition()]
 			},
 			type: 'response.create'
+		})
+	}
+
+	private sendSessionUpdate(sessionPatch: Record<string, unknown>): void {
+		this.sendEvent({
+			session: {
+				type: 'realtime',
+				...sessionPatch
+			},
+			type: 'session.update'
 		})
 	}
 

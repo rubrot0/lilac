@@ -2,6 +2,7 @@
 
 import { createRealtimeClientSecretAction } from '@/app/actions/realtime'
 import {
+	ConversationItemCreatedEventSchema,
 	InputAudioTranscriptionCompletedEventSchema,
 	InputAudioTranscriptionDeltaEventSchema,
 	RealtimeBaseServerEventSchema,
@@ -170,6 +171,14 @@ export class ChatRealtimeClient {
 	public submitTextInput(text: string): void {
 		const normalizedText = text.trim()
 		if (!normalizedText) return
+		const itemId = `typed_${crypto.randomUUID()}`
+		this.emitTranscriptPatch({
+			id: itemId,
+			replaceText: normalizedText,
+			role: 'user',
+			source: 'input_text',
+			status: 'final'
+		})
 		this.sendEvent({
 			item: {
 				content: [
@@ -178,6 +187,7 @@ export class ChatRealtimeClient {
 						type: 'input_text'
 					}
 				],
+				id: itemId,
 				role: 'user',
 				type: 'message'
 			},
@@ -189,36 +199,27 @@ export class ChatRealtimeClient {
 	}
 
 	public updateInstructions(instructions: string): void {
-		this.sendEvent({
-			session: { instructions },
-			type: 'session.update'
-		})
+		this.sendSessionUpdate({ instructions })
 	}
 
 	public updateSpeechOutputEnabled(speechOutputEnabled: boolean): void {
-		this.sendEvent({
-			session: {
-				output_modalities: [speechOutputEnabled ? 'audio' : 'text']
-			},
-			type: 'session.update'
+		this.sendSessionUpdate({
+			output_modalities: [speechOutputEnabled ? 'audio' : 'text']
 		})
 		if (!speechOutputEnabled) this.callbacks.onRemoteStream(null)
 	}
 
 	public updateTurnDelaySeconds(turnDelaySeconds: number): void {
 		const silenceDurationMilliseconds = Math.round(turnDelaySeconds * 1000)
-		this.sendEvent({
-			session: {
-				audio: {
-					input: {
-						turn_detection: {
-							silence_duration_ms: silenceDurationMilliseconds,
-							type: 'server_vad'
-						}
+		this.sendSessionUpdate({
+			audio: {
+				input: {
+					turn_detection: {
+						silence_duration_ms: silenceDurationMilliseconds,
+						type: 'server_vad'
 					}
 				}
-			},
-			type: 'session.update'
+			}
 		})
 	}
 
@@ -283,130 +284,195 @@ export class ChatRealtimeClient {
 		})
 	}
 
+	private getInputTextFromConversationItem(
+		event: ReturnType<typeof ConversationItemCreatedEventSchema.parse>
+	): null | string {
+		if (event.item.role !== 'user') return null
+		if (event.item.type !== 'message') return null
+		const contentPartList = event.item.content ?? []
+		const textPartList = contentPartList
+			.filter(contentPart => contentPart.type === 'input_text' && typeof contentPart.text === 'string')
+			.map(contentPart => (contentPart.text as string).trim())
+			.filter(Boolean)
+		if (textPartList.length === 0) return null
+		return textPartList.join('\n')
+	}
+
+	private handleConversationItemCreatedEvent(candidate: unknown): void {
+		const event = ConversationItemCreatedEventSchema.parse(candidate)
+		const inputText = this.getInputTextFromConversationItem(event)
+		if (!inputText) return
+		this.emitTranscriptPatch({
+			id: event.item.id,
+			replaceText: inputText,
+			role: 'user',
+			source: 'input_text',
+			status: 'final'
+		})
+	}
+
+	private handleInputAudioTranscriptionDeltaEvent(candidate: unknown): void {
+		const event = InputAudioTranscriptionDeltaEventSchema.parse(candidate)
+		if (!event.delta.trim()) return
+		this.emitTranscriptPatch({
+			appendText: event.delta,
+			id: event.item_id,
+			role: 'user',
+			source: 'input_transcription',
+			status: 'streaming'
+		})
+	}
+
+	private handleInputAudioTranscriptionCompletedEvent(candidate: unknown): void {
+		const event = InputAudioTranscriptionCompletedEventSchema.parse(candidate)
+		this.emitTranscriptPatch({
+			id: event.item_id,
+			replaceText: event.transcript,
+			role: 'user',
+			source: 'input_transcription',
+			status: 'final'
+		})
+	}
+
+	private handleResponseOutputItemAddedEvent(candidate: unknown): void {
+		const event = ResponseOutputItemAddedEventSchema.parse(candidate)
+		if (!event.response_id) return
+		this.assistantItemIdByResponseId.set(event.response_id, event.item.id)
+
+		const pendingText = this.pendingTextByResponseId.get(event.response_id)
+		if (pendingText) {
+			this.emitTranscriptPatch({
+				appendText: pendingText,
+				id: event.item.id,
+				role: 'assistant',
+				source: 'response_output_text',
+				status: 'streaming'
+			})
+			this.pendingTextByResponseId.delete(event.response_id)
+		}
+
+		const pendingAudioTranscript = this.pendingAudioTranscriptByResponseId.get(event.response_id)
+		if (pendingAudioTranscript) {
+			this.emitTranscriptPatch({
+				appendText: pendingAudioTranscript,
+				id: event.item.id,
+				role: 'assistant',
+				source: 'response_output_audio_transcript',
+				status: 'streaming'
+			})
+			this.pendingAudioTranscriptByResponseId.delete(event.response_id)
+		}
+	}
+
+	private handleResponseOutputTextDeltaEvent(candidate: unknown): void {
+		const event = ResponseOutputTextDeltaEventSchema.parse(candidate)
+		const assistantItemId =
+			event.item_id ??
+			(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
+		if (!assistantItemId && event.response_id) {
+			const previousPending = this.pendingTextByResponseId.get(event.response_id) ?? ''
+			this.pendingTextByResponseId.set(event.response_id, `${previousPending}${event.delta}`)
+			return
+		}
+		if (!assistantItemId) return
+		this.emitTranscriptPatch({
+			appendText: event.delta,
+			id: assistantItemId,
+			role: 'assistant',
+			source: 'response_output_text',
+			status: 'streaming'
+		})
+	}
+
+	private handleResponseOutputAudioTranscriptDeltaEvent(candidate: unknown): void {
+		const event = ResponseOutputAudioTranscriptDeltaEventSchema.parse(candidate)
+		const assistantItemId =
+			event.item_id ??
+			(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
+		if (!assistantItemId && event.response_id) {
+			const previousPending = this.pendingAudioTranscriptByResponseId.get(event.response_id) ?? ''
+			this.pendingAudioTranscriptByResponseId.set(
+				event.response_id,
+				`${previousPending}${event.delta}`
+			)
+			return
+		}
+		if (!assistantItemId) return
+		this.emitTranscriptPatch({
+			appendText: event.delta,
+			id: assistantItemId,
+			role: 'assistant',
+			source: 'response_output_audio_transcript',
+			status: 'streaming'
+		})
+	}
+
+	private handleResponseOutputTextDoneEvent(candidate: unknown): void {
+		const event = ResponseOutputTextDoneEventSchema.parse(candidate)
+		const assistantItemId =
+			event.item_id ??
+			(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
+		if (!assistantItemId) return
+		if (typeof event.text === 'string' && event.text.trim()) {
+			this.emitTranscriptPatch({
+				id: assistantItemId,
+				replaceText: event.text,
+				role: 'assistant',
+				source: 'response_output_text',
+				status: 'final'
+			})
+			return
+		}
+		this.emitTranscriptPatch({
+			id: assistantItemId,
+			role: 'assistant',
+			source: 'response_output_text',
+			status: 'final'
+		})
+	}
+
+	private sendSessionUpdate(sessionPatch: Record<string, unknown>): void {
+		this.sendEvent({
+			session: {
+				type: 'realtime',
+				...sessionPatch
+			},
+			type: 'session.update'
+		})
+	}
+
 	private handleServerEvent(rawData: unknown): void {
 		try {
 			const candidate = typeof rawData === 'string' ? JSON.parse(rawData) : rawData
 			const baseEvent = RealtimeBaseServerEventSchema.parse(candidate)
 
 			switch (baseEvent.type) {
+				case 'conversation.item.created': {
+					this.handleConversationItemCreatedEvent(candidate)
+					return
+				}
 				case 'conversation.item.input_audio_transcription.delta': {
-					const event = InputAudioTranscriptionDeltaEventSchema.parse(candidate)
-					if (!event.delta.trim()) return
-					this.emitTranscriptPatch({
-						appendText: event.delta,
-						id: event.item_id,
-						role: 'user',
-						source: 'input_transcription',
-						status: 'streaming'
-					})
+					this.handleInputAudioTranscriptionDeltaEvent(candidate)
 					return
 				}
 				case 'conversation.item.input_audio_transcription.completed': {
-					const event = InputAudioTranscriptionCompletedEventSchema.parse(candidate)
-					this.emitTranscriptPatch({
-						id: event.item_id,
-						replaceText: event.transcript,
-						role: 'user',
-						source: 'input_transcription',
-						status: 'final'
-					})
+					this.handleInputAudioTranscriptionCompletedEvent(candidate)
 					return
 				}
 				case 'response.output_item.added': {
-					const event = ResponseOutputItemAddedEventSchema.parse(candidate)
-					if (!event.response_id) return
-					this.assistantItemIdByResponseId.set(event.response_id, event.item.id)
-
-					const pendingText = this.pendingTextByResponseId.get(event.response_id)
-					if (pendingText) {
-						this.emitTranscriptPatch({
-							appendText: pendingText,
-							id: event.item.id,
-							role: 'assistant',
-							source: 'response_output_text',
-							status: 'streaming'
-						})
-						this.pendingTextByResponseId.delete(event.response_id)
-					}
-
-					const pendingAudioTranscript = this.pendingAudioTranscriptByResponseId.get(event.response_id)
-					if (pendingAudioTranscript) {
-						this.emitTranscriptPatch({
-							appendText: pendingAudioTranscript,
-							id: event.item.id,
-							role: 'assistant',
-							source: 'response_output_audio_transcript',
-							status: 'streaming'
-						})
-						this.pendingAudioTranscriptByResponseId.delete(event.response_id)
-					}
+					this.handleResponseOutputItemAddedEvent(candidate)
 					return
 				}
 				case 'response.output_text.delta': {
-					const event = ResponseOutputTextDeltaEventSchema.parse(candidate)
-					const assistantItemId =
-						event.item_id ??
-						(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
-					if (!assistantItemId && event.response_id) {
-						const previousPending = this.pendingTextByResponseId.get(event.response_id) ?? ''
-						this.pendingTextByResponseId.set(event.response_id, `${previousPending}${event.delta}`)
-						return
-					}
-					if (!assistantItemId) return
-					this.emitTranscriptPatch({
-						appendText: event.delta,
-						id: assistantItemId,
-						role: 'assistant',
-						source: 'response_output_text',
-						status: 'streaming'
-					})
+					this.handleResponseOutputTextDeltaEvent(candidate)
 					return
 				}
 				case 'response.output_audio_transcript.delta': {
-					const event = ResponseOutputAudioTranscriptDeltaEventSchema.parse(candidate)
-					const assistantItemId =
-						event.item_id ??
-						(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
-					if (!assistantItemId && event.response_id) {
-						const previousPending = this.pendingAudioTranscriptByResponseId.get(event.response_id) ?? ''
-						this.pendingAudioTranscriptByResponseId.set(
-							event.response_id,
-							`${previousPending}${event.delta}`
-						)
-						return
-					}
-					if (!assistantItemId) return
-					this.emitTranscriptPatch({
-						appendText: event.delta,
-						id: assistantItemId,
-						role: 'assistant',
-						source: 'response_output_audio_transcript',
-						status: 'streaming'
-					})
+					this.handleResponseOutputAudioTranscriptDeltaEvent(candidate)
 					return
 				}
 				case 'response.output_text.done': {
-					const event = ResponseOutputTextDoneEventSchema.parse(candidate)
-					const assistantItemId =
-						event.item_id ??
-						(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
-					if (!assistantItemId) return
-					if (typeof event.text === 'string' && event.text.trim()) {
-						this.emitTranscriptPatch({
-							id: assistantItemId,
-							replaceText: event.text,
-							role: 'assistant',
-							source: 'response_output_text',
-							status: 'final'
-						})
-						return
-					}
-					this.emitTranscriptPatch({
-						id: assistantItemId,
-						role: 'assistant',
-						source: 'response_output_text',
-						status: 'final'
-					})
+					this.handleResponseOutputTextDoneEvent(candidate)
 					return
 				}
 				case 'response.done': {

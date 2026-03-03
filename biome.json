@@ -1,4 +1,9 @@
 {
+	"css": {
+		"parser": {
+			"tailwindDirectives": true
+		}
+	},
 	"extends": ["@rubriclab/config/biome"],
 	"files": {
 		"includes": ["**", "!next-env.d.ts"]

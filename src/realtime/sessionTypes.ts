@@ -36,6 +36,7 @@ export type UtteranceCard = {
 
 export type ChatTranscriptSource =
 	| 'input_transcription'
+	| 'input_text'
 	| 'response_output_text'
 	| 'response_output_audio_transcript'
 

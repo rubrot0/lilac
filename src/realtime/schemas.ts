@@ -50,8 +50,7 @@ export const CreateRealtimeClientSecretActionOutputSchema = z.object({
 export const CreateTranslateRealtimeClientSecretActionInputSchema = z.object({
 	model: ChatRealtimeModelSchema.default(defaultChatRealtimeModel),
 	primaryLanguageCode: KnownLanguageCodeSchema,
-	secondaryLanguageCode: KnownLanguageCodeSchema,
-	turnDelaySeconds: z.number().min(0.2).max(6).default(1.2)
+	secondaryLanguageCode: KnownLanguageCodeSchema
 })
 
 export const CreateTranslateRealtimeClientSecretActionOutputSchema = z.object({
@@ -106,6 +105,29 @@ export const InputAudioTranscriptionCompletedEventSchema = z
 		item_id: z.string(),
 		transcript: z.string(),
 		type: z.literal('conversation.item.input_audio_transcription.completed')
+	})
+	.passthrough()
+
+const ConversationItemContentPartSchema = z
+	.object({
+		text: z.string().optional(),
+		transcript: z.string().optional(),
+		type: z.string()
+	})
+	.passthrough()
+
+export const ConversationItemCreatedEventSchema = z
+	.object({
+		item: z
+			.object({
+				content: z.array(ConversationItemContentPartSchema).optional(),
+				id: z.string(),
+				role: z.string().optional(),
+				type: z.string().optional()
+			})
+			.passthrough(),
+		previous_item_id: z.string().nullable().optional(),
+		type: z.literal('conversation.item.created')
 	})
 	.passthrough()
 

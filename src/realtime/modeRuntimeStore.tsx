@@ -399,7 +399,6 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			model: defaultChatRealtimeModel,
 			primaryLanguageCode: translateSettingsRef.current.primaryLanguageCode,
 			secondaryLanguageCode: translateSettingsRef.current.secondaryLanguageCode,
-			turnDelaySeconds: chatTurnDelaySecondsRef.current,
 			voiceInputEnabled: voiceInputEnabledRef.current
 		})
 	}, [stopAllClients])
@@ -456,8 +455,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			if (mode === 'translate') {
 				liveTranslateClientRef.current?.updateTranslateSettings({
 					primaryLanguageCode: nextSettings.primaryLanguageCode,
-					secondaryLanguageCode: nextSettings.secondaryLanguageCode,
-					turnDelaySeconds: chatTurnDelaySecondsRef.current
+					secondaryLanguageCode: nextSettings.secondaryLanguageCode
 				})
 			}
 		},
@@ -561,27 +559,9 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	useEffect(() => {
 		if (!isHydrated) return
 		window.localStorage.setItem(storageKeys.chatTurnDelaySeconds, String(chatTurnDelaySeconds))
-		switch (mode) {
-			case 'chat':
-				chatClientRef.current?.updateTurnDelaySeconds(chatTurnDelaySeconds)
-				return
-			case 'translate':
-				liveTranslateClientRef.current?.updateTranslateSettings({
-					primaryLanguageCode: translateSettings.primaryLanguageCode,
-					secondaryLanguageCode: translateSettings.secondaryLanguageCode,
-					turnDelaySeconds: chatTurnDelaySeconds
-				})
-				return
-			default:
-				return
-		}
-	}, [
-		chatTurnDelaySeconds,
-		isHydrated,
-		mode,
-		translateSettings.primaryLanguageCode,
-		translateSettings.secondaryLanguageCode
-	])
+		if (mode !== 'chat') return
+		chatClientRef.current?.updateTurnDelaySeconds(chatTurnDelaySeconds)
+	}, [chatTurnDelaySeconds, isHydrated, mode])
 
 	useEffect(() => {
 		if (!isHydrated) return
