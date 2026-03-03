@@ -25,6 +25,8 @@ type ScenarioResult = {
 const genericServerComponentErrorText =
 	'An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details.'
 const missingSessionTypeErrorText = "Missing required parameter: 'session.type'."
+const invalidItemIdErrorText = "Invalid 'item.id':"
+const trackedProtocolErrorTextList = [missingSessionTypeErrorText, invalidItemIdErrorText]
 
 const mobileViewports = [
 	{ height: 812, width: 375 },
@@ -97,6 +99,33 @@ async function waitForConnectionLive(page: Page): Promise<void> {
 	)
 }
 
+async function switchToModeWithRetry(
+	page: Page,
+	targetMode: 'chat' | 'translate',
+	maxAttempts = 3
+): Promise<void> {
+	const triggerTestId = targetMode === 'chat' ? 'mode-tab-chat' : 'mode-tab-translate'
+
+	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		await page.getByTestId(triggerTestId).click({ timeout: 15_000 })
+		try {
+			await waitForCondition(
+				async function hasTargetModeBadge(): Promise<boolean> {
+					const modeBadgeText = await page.getByTestId('mode-active-badge').innerText()
+					return modeBadgeText.toLowerCase().includes(targetMode)
+				},
+				8_000,
+				`Mode switch to ${targetMode} did not complete.`
+			)
+			return
+		} catch {
+			if (attempt === maxAttempts) {
+				throw new Error(`Mode switch to ${targetMode} did not complete.`)
+			}
+		}
+	}
+}
+
 async function writeScenarioArtifacts(
 	page: Page,
 	artifactDirectoryPath: string,
@@ -114,6 +143,10 @@ async function writeScenarioArtifacts(
 	await writeFile(htmlPath, await page.content(), 'utf8')
 
 	return bodyText
+}
+
+function collectProtocolErrorText(bodyText: string): string[] {
+	return trackedProtocolErrorTextList.filter(errorText => bodyText.includes(errorText))
 }
 
 async function clickSliderByRatio(page: Page, testId: string, ratio: number): Promise<void> {
@@ -146,7 +179,7 @@ async function runChatScenario(page: Page, artifactDirectoryPath: string): Promi
 	const failures: string[] = []
 	const typedMessage = `typed smoke ${Date.now()}`
 	try {
-		await page.getByTestId('mode-tab-chat').click()
+		await switchToModeWithRetry(page, 'chat')
 		await waitForConnectionLive(page)
 
 		await page.getByTestId('chat-settings-open-desktop').click()
@@ -192,6 +225,10 @@ async function runChatScenario(page: Page, artifactDirectoryPath: string): Promi
 	if (bodyText.includes(genericServerComponentErrorText)) {
 		failures.push('Chat mode rendered generic Server Components error text.')
 	}
+	const protocolErrors = collectProtocolErrorText(bodyText)
+	for (const protocolError of protocolErrors) {
+		failures.push(`Chat mode rendered protocol error text: ${protocolError}`)
+	}
 
 	return {
 		failures,
@@ -206,7 +243,7 @@ async function runTranslateScenario(
 	const failures: string[] = []
 	let connectionFailureMessage: null | string = null
 	try {
-		await page.getByTestId('mode-tab-translate').click()
+		await switchToModeWithRetry(page, 'translate')
 		try {
 			await waitForConnectionLive(page)
 		} catch (error) {
@@ -245,8 +282,9 @@ async function runTranslateScenario(
 	if (bodyText.includes(genericServerComponentErrorText)) {
 		failures.push('Translate mode rendered generic Server Components error text.')
 	}
-	if (bodyText.includes(missingSessionTypeErrorText)) {
-		failures.push('Translate mode rendered session.type protocol error text.')
+	const protocolErrors = collectProtocolErrorText(bodyText)
+	for (const protocolError of protocolErrors) {
+		failures.push(`Translate mode rendered protocol error text: ${protocolError}`)
 	}
 
 	return {
@@ -276,15 +314,7 @@ async function runMobileThemeChecks(
 				const page = await context.newPage()
 				await page.goto(targetUrl, { timeout: 120_000, waitUntil: 'domcontentloaded' })
 
-				await page.getByTestId('mode-tab-translate').click()
-				await waitForCondition(
-					async function hasTranslateModeBadge(): Promise<boolean> {
-						const modeBadgeText = await page.getByTestId('mode-active-badge').innerText()
-						return modeBadgeText.toLowerCase().includes('translate')
-					},
-					10_000,
-					'Mode switch to translate did not complete.'
-				)
+				await switchToModeWithRetry(page, 'translate')
 
 				const hasHorizontalOverflow = await page.evaluate(function detectOverflow(): boolean {
 					return document.documentElement.scrollWidth > window.innerWidth + 1
@@ -305,6 +335,11 @@ async function runMobileThemeChecks(
 				if (bodyText.includes(genericServerComponentErrorText)) {
 					failures.push(
 						`layout-${colorScheme}-${viewport.width}x${viewport.height}: generic Server Components error text rendered`
+					)
+				}
+				for (const protocolError of collectProtocolErrorText(bodyText)) {
+					failures.push(
+						`layout-${colorScheme}-${viewport.width}x${viewport.height}: protocol error text rendered: ${protocolError}`
 					)
 				}
 			} catch (error) {

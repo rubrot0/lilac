@@ -68,6 +68,7 @@ export async function collectRuntimeErrorMatches(runtimeLogPath: string): Promis
 	const matchPatterns = [
 		/Unsupported parameter/i,
 		/Unknown parameter/i,
+		/Invalid 'item\.id'/i,
 		/Unhandled/i,
 		/An error occurred in the Server Components render/i,
 		/\bdigest\b/i

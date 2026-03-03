@@ -42,6 +42,11 @@ export type ChatRealtimeClientCallbacks = {
 	onTranscriptPatch: (patch: ChatTranscriptPatch) => void
 }
 
+function createClientItemId(prefix: string): string {
+	const randomSegment = crypto.randomUUID().replaceAll('-', '').slice(0, 24)
+	return `${prefix}_${randomSegment}`
+}
+
 export class ChatRealtimeClient {
 	private assistantItemIdByResponseId = new Map<string, string>()
 	private callbacks: ChatRealtimeClientCallbacks
@@ -171,7 +176,7 @@ export class ChatRealtimeClient {
 	public submitTextInput(text: string): void {
 		const normalizedText = text.trim()
 		if (!normalizedText) return
-		const itemId = `typed_${crypto.randomUUID()}`
+		const itemId = createClientItemId('typed')
 		this.emitTranscriptPatch({
 			id: itemId,
 			replaceText: normalizedText,

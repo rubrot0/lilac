@@ -56,6 +56,11 @@ type PendingResponseContext = {
 	itemId: string
 }
 
+function createClientItemId(prefix: string): string {
+	const randomSegment = crypto.randomUUID().replaceAll('-', '').slice(0, 24)
+	return `${prefix}_${randomSegment}`
+}
+
 function createTranslateInstructions(
 	primaryLanguageCode: string,
 	secondaryLanguageCode: string
@@ -244,7 +249,7 @@ export class LiveTranslateRealtimeClient {
 	public submitTextInput(text: string): void {
 		const normalizedText = text.trim()
 		if (!normalizedText) return
-		const itemId = `typed_${crypto.randomUUID()}`
+		const itemId = createClientItemId('typed')
 		this.registerSourceItem(itemId, null)
 		this.callbacks.onSourcePatch({
 			inputOrigin: 'text',
