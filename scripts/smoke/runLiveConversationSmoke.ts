@@ -108,6 +108,7 @@ async function switchToModeWithRetry(
 	const triggerTestId = targetMode === 'chat' ? 'mode-tab-chat' : 'mode-tab-translate'
 
 	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		await page.keyboard.press('Escape').catch(() => {})
 		await page.getByTestId(triggerTestId).click({ timeout: 15_000 })
 		try {
 			await waitForCondition(
@@ -124,6 +125,24 @@ async function switchToModeWithRetry(
 				throw new Error(`Mode switch to ${targetMode} did not complete.`)
 			}
 		}
+	}
+}
+
+async function openGlobalSettings(page: Page): Promise<void> {
+	const desktopButton = page.getByTestId('global-settings-open-desktop')
+	if (await desktopButton.isVisible().catch(() => false)) {
+		await desktopButton.click()
+		return
+	}
+	await page.getByTestId('global-settings-open-mobile').click()
+}
+
+async function closeOverlayIfPresent(page: Page): Promise<void> {
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		const overlayCount = await page.locator('[data-state="open"][aria-hidden="true"]').count()
+		if (overlayCount === 0) return
+		await page.keyboard.press('Escape').catch(() => {})
+		await page.waitForTimeout(120)
 	}
 }
 
@@ -162,20 +181,6 @@ async function clickSliderByRatio(page: Page, testId: string, ratio: number): Pr
 	await page.mouse.click(clickX, clickY)
 }
 
-async function selectByLabel(
-	page: Page,
-	triggerTestId: string,
-	optionLabel: string
-): Promise<void> {
-	await page.getByTestId(triggerTestId).click()
-	const optionByRole = page.getByRole('option', { name: optionLabel }).first()
-	if (await optionByRole.count()) {
-		await optionByRole.click()
-		return
-	}
-	await page.locator('[data-radix-collection-item]').filter({ hasText: optionLabel }).first().click()
-}
-
 async function runChatScenario(page: Page, artifactDirectoryPath: string): Promise<ScenarioResult> {
 	const failures: string[] = []
 	const typedMessage = `typed smoke ${Date.now()}`
@@ -183,7 +188,7 @@ async function runChatScenario(page: Page, artifactDirectoryPath: string): Promi
 		await switchToModeWithRetry(page, 'chat')
 		await waitForConnectionLive(page)
 
-		await page.getByTestId('chat-settings-open-desktop').click()
+		await openGlobalSettings(page)
 		await clickSliderByRatio(page, 'chat-turn-delay-slider', 0.68)
 		await page.waitForTimeout(800)
 
@@ -192,7 +197,7 @@ async function runChatScenario(page: Page, artifactDirectoryPath: string): Promi
 			throw new Error('Chat slider interaction triggered session.type error.')
 		}
 
-		await page.keyboard.press('Escape')
+		await closeOverlayIfPresent(page)
 		await page.getByTestId('chat-text-input').fill(typedMessage)
 		await page.getByTestId('chat-text-send').click()
 
@@ -244,6 +249,7 @@ async function runTranslateScenario(
 	const failures: string[] = []
 	let connectionFailureMessage: null | string = null
 	try {
+		await closeOverlayIfPresent(page)
 		await switchToModeWithRetry(page, 'translate')
 		try {
 			await waitForConnectionLive(page)
@@ -252,7 +258,10 @@ async function runTranslateScenario(
 				error instanceof Error ? error.message : 'Translate mode connection did not become live.'
 		}
 
-		await selectByLabel(page, 'translate-secondary-language', 'French')
+		await page.getByTestId('translate-language-picker-open-desktop').click()
+		await page.getByTestId('translate-secondary-language-search').fill('French')
+		await page.getByTestId('translate-secondary-language-option-fr').click()
+		await page.keyboard.press('Escape')
 		await page.waitForTimeout(1000)
 		const bodyTextAfterLanguageChange = await page.locator('body').innerText()
 		if (bodyTextAfterLanguageChange.includes(missingSessionTypeErrorText)) {
@@ -331,6 +340,9 @@ async function runMobileThemeChecks(
 				const hasHorizontalOverflow = await page.evaluate(function detectOverflow(): boolean {
 					return document.documentElement.scrollWidth > window.innerWidth + 1
 				})
+				const hasDocumentVerticalGrowth = await page.evaluate(function detectVerticalGrowth(): boolean {
+					return document.documentElement.scrollHeight > window.innerHeight + 1
+				})
 				const bodyText = await page.locator('body').innerText()
 
 				const screenshotPath = join(
@@ -342,6 +354,11 @@ async function runMobileThemeChecks(
 				if (hasHorizontalOverflow) {
 					failures.push(
 						`layout-${colorScheme}-${viewport.width}x${viewport.height}: horizontal overflow detected`
+					)
+				}
+				if (hasDocumentVerticalGrowth) {
+					failures.push(
+						`layout-${colorScheme}-${viewport.width}x${viewport.height}: document vertical growth detected`
 					)
 				}
 				if (bodyText.includes(genericServerComponentErrorText)) {

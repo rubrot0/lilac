@@ -113,19 +113,17 @@ function int16ArrayToBase64(inputArray: Int16Array): string {
 	return btoa(binaryString)
 }
 
-function buildTranscriptionPrompt(myLanguageCode: string, translateToLanguageCode: string): string {
-	return `Likely conversation languages: ${myLanguageCode} and ${translateToLanguageCode}. Preserve punctuation and proper nouns.`
+function buildTranscriptionPrompt(): string {
+	return 'Transcribe spoken audio faithfully. Preserve punctuation and proper nouns.'
 }
 
 export class SubtitleTranscriptionClient {
 	private audioContext: AudioContext | null = null
 	private callbacks: SubtitleTranscriptionClientCallbacks
-	private commitIntervalId: null | number = null
 	private generation = 0
 	private localAudioStream: MediaStream | null = null
 	private micProcessorNode: ScriptProcessorNode | null = null
 	private micSourceNode: MediaStreamAudioSourceNode | null = null
-	private pendingAudioSinceLastCommit = false
 	private previousItemIdByItemId = new Map<string, null | string>()
 	private silentGainNode: GainNode | null = null
 	private state: SubtitleTranscriptionClientState = 'disconnected'
@@ -165,7 +163,7 @@ export class SubtitleTranscriptionClient {
 						input_audio_format: 'pcm16',
 						input_audio_transcription: {
 							model: defaultInputTranscriptionModel,
-							prompt: buildTranscriptionPrompt(input.myLanguageCode, input.translateToLanguageCode)
+							prompt: buildTranscriptionPrompt()
 						},
 						turn_detection: {
 							eagerness: 'high',
@@ -237,11 +235,12 @@ export class SubtitleTranscriptionClient {
 	}
 
 	public updateSubtitleSettings(settings: SubtitleTranscriptionSettings): void {
+		void settings
 		this.sendEvent({
 			session: {
 				input_audio_transcription: {
 					model: defaultInputTranscriptionModel,
-					prompt: buildTranscriptionPrompt(settings.myLanguageCode, settings.translateToLanguageCode)
+					prompt: buildTranscriptionPrompt()
 				},
 				type: 'transcription'
 			},
@@ -282,7 +281,6 @@ export class SubtitleTranscriptionClient {
 			if (pcm16Buffer.length === 0) return
 			const audioBase64 = int16ArrayToBase64(pcm16Buffer)
 			if (!audioBase64) return
-			this.pendingAudioSinceLastCommit = true
 			this.sendEvent({
 				audio: audioBase64,
 				type: 'input_audio_buffer.append'
@@ -294,27 +292,9 @@ export class SubtitleTranscriptionClient {
 		this.silentGainNode.connect(audioContext.destination)
 
 		this.callbacks.onListeningStateChange(true)
-		this.startCommitLoop()
-	}
-
-	private startCommitLoop(): void {
-		if (this.commitIntervalId !== null) return
-		this.commitIntervalId = window.setInterval(() => {
-			if (!this.pendingAudioSinceLastCommit) return
-			this.pendingAudioSinceLastCommit = false
-			this.sendEvent({
-				type: 'input_audio_buffer.commit'
-			})
-		}, 1800)
 	}
 
 	private stopVoiceInput(): void {
-		if (this.commitIntervalId !== null) {
-			window.clearInterval(this.commitIntervalId)
-			this.commitIntervalId = null
-		}
-		this.pendingAudioSinceLastCommit = false
-
 		if (this.micProcessorNode) {
 			this.micProcessorNode.disconnect()
 			this.micProcessorNode.onaudioprocess = null

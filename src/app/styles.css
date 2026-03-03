@@ -18,6 +18,8 @@
 	--lilac-brand-primary-foreground: #f9f5ec;
 	--lilac-direction-primary: #5f43be;
 	--lilac-direction-secondary: #2f6dd8;
+	--lilac-button-disabled-bg: color-mix(in oklab, var(--lilac-brand-primary) 22%, white 78%);
+	--lilac-button-disabled-fg: color-mix(in oklab, var(--lilac-ink) 62%, white 38%);
 
 	--background: var(--lilac-surface);
 	--foreground: var(--lilac-ink);
@@ -67,6 +69,8 @@
 		--lilac-brand-primary-foreground: #140f23;
 		--lilac-direction-primary: #a996ff;
 		--lilac-direction-secondary: #8cc2ff;
+		--lilac-button-disabled-bg: color-mix(in oklab, #2a2140 78%, #54468a 22%);
+		--lilac-button-disabled-fg: color-mix(in oklab, #f6f1ff 52%, #b9aacd 48%);
 
 		--background: var(--lilac-surface);
 		--foreground: var(--lilac-ink);

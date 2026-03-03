@@ -219,12 +219,13 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 	value: string
 }> {
 	const parsedInput = CreateRealtimeTranscriptionSessionActionInputSchema.parse(input)
+	void parsedInput
 
 	const payload = await postOpenAi('/realtime/transcription_sessions', {
 		input_audio_format: 'pcm16',
 		input_audio_transcription: {
 			model: defaultTranscriptionModel,
-			prompt: `Likely conversation languages: ${parsedInput.myLanguageCode} and ${parsedInput.translateToLanguageCode}. Keep proper nouns and punctuation.`
+			prompt: 'Transcribe spoken audio faithfully. Preserve punctuation and proper nouns.'
 		},
 		turn_detection: {
 			eagerness: 'high',

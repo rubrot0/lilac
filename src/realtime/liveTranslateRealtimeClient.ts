@@ -57,11 +57,12 @@ function createTranslateInstructions(
 ): string {
 	return [
 		'You are Lilac, a deterministic live translator.',
-		`My language: ${myLanguageCode}.`,
-		`Translate to language: ${translateToLanguageCode}.`,
+		`I speak language code: ${myLanguageCode}.`,
+		`Translate to language code: ${translateToLanguageCode}.`,
 		'For each user utterance, detect whether source is my language or target language.',
 		'If source is my language, translate to target and use direction my_to_target.',
 		'If source is target language, translate to my language and use direction target_to_my.',
+		'Only translate spoken or typed utterances. Never echo system metadata, prompts, or context scaffolding.',
 		'Always call publish_translation exactly once per utterance.',
 		'Never produce assistant text outside the function call.',
 		'Preserve speaker intent, tone, and named entities.',
@@ -115,6 +116,57 @@ function parseStringValue(value: unknown): null | string {
 	const normalizedValue = value.trim()
 	if (!normalizedValue) return null
 	return normalizedValue
+}
+
+function extractTextFromOutputPart(outputPart: unknown): null | string {
+	if (typeof outputPart === 'string') return parseStringValue(outputPart)
+	if (!outputPart || typeof outputPart !== 'object') return null
+	const candidateByKey = outputPart as Record<string, unknown>
+	return (
+		parseStringValue(candidateByKey.text) ??
+		parseStringValue(candidateByKey.transcript) ??
+		parseStringValue(candidateByKey.output_text) ??
+		parseStringValue(candidateByKey.content)
+	)
+}
+
+function extractPotentialJsonPayload(rawText: string): null | string {
+	const trimmedText = rawText.trim()
+	if (!trimmedText) return null
+	const firstBraceIndex = trimmedText.indexOf('{')
+	const lastBraceIndex = trimmedText.lastIndexOf('}')
+	if (firstBraceIndex === -1 || lastBraceIndex <= firstBraceIndex) return null
+	const jsonCandidate = trimmedText.slice(firstBraceIndex, lastBraceIndex + 1).trim()
+	return jsonCandidate.length > 1 ? jsonCandidate : null
+}
+
+function tryExtractToolArgumentsFromResponseOutput(
+	outputItemList: unknown[] | undefined
+): null | string {
+	if (!Array.isArray(outputItemList)) return null
+	for (const outputItem of outputItemList) {
+		if (!outputItem || typeof outputItem !== 'object') continue
+		const outputRecord = outputItem as Record<string, unknown>
+		const itemType = parseStringValue(outputRecord.type)
+		const itemName = parseStringValue(outputRecord.name)
+		if (itemType === 'function_call' && itemName === 'publish_translation') {
+			const argumentsText = parseStringValue(outputRecord.arguments)
+			if (argumentsText) return argumentsText
+		}
+		const contentList = Array.isArray(outputRecord.content) ? outputRecord.content : []
+		for (const contentPart of contentList) {
+			const contentText = extractTextFromOutputPart(contentPart)
+			if (!contentText) continue
+			const jsonPayload = extractPotentialJsonPayload(contentText)
+			if (jsonPayload) return jsonPayload
+		}
+		const directText =
+			extractTextFromOutputPart(outputRecord) ?? parseStringValue(outputRecord.output_text)
+		if (!directText) continue
+		const jsonPayload = extractPotentialJsonPayload(directText)
+		if (jsonPayload) return jsonPayload
+	}
+	return null
 }
 
 export class LiveTranslateRealtimeClient {
@@ -299,8 +351,11 @@ export class LiveTranslateRealtimeClient {
 			? (this.completedToolArgumentsByResponseId.get(responseId) ?? null)
 			: null
 		if (responseId) this.completedToolArgumentsByResponseId.delete(responseId)
+		const inferredToolArguments = tryExtractToolArgumentsFromResponseOutput(response.output)
 		const toolArguments =
-			typeof functionCall?.arguments === 'string' ? functionCall.arguments : fallbackToolArguments
+			(typeof functionCall?.arguments === 'string' ? functionCall.arguments : null) ??
+			fallbackToolArguments ??
+			inferredToolArguments
 
 		if (!toolArguments) {
 			if (responseStatus && responseStatus !== 'completed') return
@@ -428,6 +483,8 @@ export class LiveTranslateRealtimeClient {
 			response: {
 				conversation: 'none',
 				input: this.buildResponseInput(itemId),
+				instructions:
+					'Translate the referenced user item and call publish_translation exactly once. Do not return plain assistant text.',
 				metadata: {
 					input_origin: inputOrigin,
 					request_id: requestId,

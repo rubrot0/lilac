@@ -129,6 +129,22 @@ export const InputAudioTranscriptionCompletedEventSchema = z
 	})
 	.passthrough()
 
+export const SanitizedSubtitleSegmentSchema = z.object({
+	itemId: z.string().min(1),
+	text: z.string().min(1)
+})
+
+export const SystemLeakTextSchema = z
+	.array(z.string().min(1))
+	.default([
+		'context:',
+		'likely conversation languages',
+		'keep proper nouns',
+		'preserve punctuation',
+		'no summaries',
+		'no commentary'
+	])
+
 const ConversationItemContentPartSchema = z
 	.object({
 		text: z.string().optional(),

@@ -29,6 +29,20 @@ export type LiveSubtitleState = {
 	updatedAt: number
 }
 
+export type TranslateSegmentAggregationState = {
+	activeUtteranceId: null | string
+	lastFinalizedAt: null | number
+	pendingSourceText: string
+	sourceLanguageCode: null | string
+}
+
+export type ConnectionHealthState = {
+	isReconnecting: boolean
+	lastErrorAt: null | number
+	subtitleConnected: boolean
+	translateConnected: boolean
+}
+
 export type UtteranceDirection = 'my_to_target' | 'target_to_my'
 
 export type UtteranceStatus = 'streaming' | 'translating' | 'final' | 'error'
@@ -57,6 +71,7 @@ export type ChatTranscriptSource =
 export type ChatTranscriptStatus = 'streaming' | 'final'
 
 export type ChatTranscriptMessage = {
+	clientSequence: number
 	id: string
 	role: 'user' | 'assistant'
 	text: string
