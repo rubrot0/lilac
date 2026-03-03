@@ -14,6 +14,7 @@
 		"@types/node": "^24.10.1",
 		"@types/react": "^19.2.3",
 		"@types/react-dom": "^19.2.3",
+		"playwright": "^1.58.2",
 		"prisma": "^6.19.0",
 		"typescript": "^5.9.3",
 		"zod": "^4.1.12"
@@ -32,6 +33,9 @@
 		"db:studio": "prisma studio",
 		"dev": "next dev",
 		"format": "bun x biome check --write .",
+		"smoke:live": "bun run scripts/smoke/runLiveConversationSmoke.ts --target-url https://lilac.chat",
+		"smoke:local": "bun run scripts/smoke/runLiveConversationSmoke.ts --target-url http://localhost:3000 --skip-vercel-logs --skip-chat",
+		"smoke:prepare-audio": "bun run scripts/smoke/generateSmokeAudio.ts",
 		"start": "next start"
 	},
 	"version": "0.0.0"

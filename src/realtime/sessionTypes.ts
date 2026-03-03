@@ -1,22 +1,29 @@
-export type LilacMode = 'chat' | 'translate' | 'transcribe'
+export type LilacMode = 'chat' | 'translate'
 
 export type ModeConnectionState = 'idle' | 'connecting' | 'connected' | 'error'
+
+export type GlobalAudioInputSettings = {
+	voiceInputEnabled: boolean
+}
+
+export type ChatOutputSettings = {
+	speechOutputEnabled: boolean
+}
 
 export type TranslateSettings = {
 	primaryLanguageCode: string
 	secondaryLanguageCode: string
 }
 
-export type TranscribeSettings = {
-	targetLanguageCode: string
-}
-
-export type UtteranceDirection = 'primary_to_secondary' | 'secondary_to_primary' | 'to_target'
+export type UtteranceDirection = 'primary_to_secondary' | 'secondary_to_primary'
 
 export type UtteranceStatus = 'streaming' | 'translating' | 'final' | 'error'
 
 export type UtteranceCard = {
 	id: string
+	sourceItemId: string
+	responseId?: string
+	inputOrigin: 'audio' | 'text'
 	sourceText: string
 	sourceLanguageCode: string
 	translatedText: string
@@ -41,14 +48,6 @@ export type ChatTranscriptMessage = {
 	status: ChatTranscriptStatus
 	source: ChatTranscriptSource
 	createdAt: number
-}
-
-export type TranslationContextEntry = {
-	sourceText: string
-	sourceLanguageCode: string
-	translatedText: string
-	targetLanguageCode: string
-	direction: UtteranceDirection
 }
 
 export const languageOptions = [

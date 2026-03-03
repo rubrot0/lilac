@@ -11,22 +11,23 @@ import {
 	useState
 } from 'react'
 
-import { compactTranslationContextAction, translateUtteranceAction } from '@/app/actions/realtime'
 import { ChatRealtimeClient, type ChatTranscriptPatch } from '@/realtime/chatRealtimeClient'
+import {
+	LiveTranslateRealtimeClient,
+	type LiveTranslateResultPatch,
+	type LiveTranslateSourcePatch
+} from '@/realtime/liveTranslateRealtimeClient'
+import { defaultChatRealtimeModel } from '@/realtime/modelConfig'
 import type {
+	ChatOutputSettings,
 	ChatTranscriptMessage,
+	GlobalAudioInputSettings,
 	LilacMode,
 	ModeConnectionState,
-	TranscribeSettings,
 	TranslateSettings,
-	TranslationContextEntry,
 	UtteranceCard,
 	UtteranceDirection
 } from '@/realtime/sessionTypes'
-import {
-	type TranscriptionPatch,
-	TranscriptionSocketClient
-} from '@/realtime/transcriptionSocketClient'
 
 const defaultChatInstructions =
 	'You are Lilac. Help users communicate across languages. Keep answers concise, faithful, and practical.'
@@ -36,17 +37,22 @@ const defaultTranslateSettings: TranslateSettings = {
 	secondaryLanguageCode: 'es'
 }
 
-const defaultTranscribeSettings: TranscribeSettings = {
-	targetLanguageCode: 'en'
+const defaultGlobalAudioInputSettings: GlobalAudioInputSettings = {
+	voiceInputEnabled: true
+}
+
+const defaultChatOutputSettings: ChatOutputSettings = {
+	speechOutputEnabled: true
 }
 
 const storageKeys = {
 	chatInstructions: 'lilac.chat.instructions',
+	chatSpeechOutputEnabled: 'lilac.chat.speechOutputEnabled',
 	chatTurnDelaySeconds: 'lilac.chat.turnDelaySeconds',
 	mode: 'lilac.mode',
-	transcribeTargetLanguage: 'lilac.transcribe.targetLanguageCode',
 	translatePrimaryLanguage: 'lilac.translate.primaryLanguageCode',
-	translateSecondaryLanguage: 'lilac.translate.secondaryLanguageCode'
+	translateSecondaryLanguage: 'lilac.translate.secondaryLanguageCode',
+	voiceInputEnabled: 'lilac.global.voiceInputEnabled'
 } as const
 
 function normalizeTurnDelaySeconds(value: unknown): number {
@@ -56,17 +62,49 @@ function normalizeTurnDelaySeconds(value: unknown): number {
 	return Math.round(clampedValue * 10) / 10
 }
 
-function createEmptyUtteranceCard(id: string, direction: UtteranceDirection): UtteranceCard {
+function parseStoredBoolean(value: string | null, fallbackValue: boolean): boolean {
+	if (value === 'true') return true
+	if (value === 'false') return false
+	return fallbackValue
+}
+
+function createEmptyUtteranceCard(
+	itemId: string,
+	inputOrigin: 'audio' | 'text',
+	fallbackDirection: UtteranceDirection,
+	translateSettings: TranslateSettings
+): UtteranceCard {
 	return {
 		createdAt: Date.now(),
-		direction,
-		id,
-		sourceLanguageCode: 'und',
+		direction: fallbackDirection,
+		id: itemId,
+		inputOrigin,
+		sourceItemId: itemId,
+		sourceLanguageCode: translateSettings.primaryLanguageCode,
 		sourceText: '',
 		status: 'streaming',
-		targetLanguageCode: 'und',
+		targetLanguageCode:
+			fallbackDirection === 'secondary_to_primary'
+				? translateSettings.primaryLanguageCode
+				: translateSettings.secondaryLanguageCode,
 		translatedText: ''
 	}
+}
+
+function insertCardByPreviousItemId(
+	cardList: UtteranceCard[],
+	nextCard: UtteranceCard,
+	previousItemId?: null | string
+): UtteranceCard[] {
+	const filteredCards = cardList.filter(card => card.id !== nextCard.id)
+	if (!previousItemId) return [...filteredCards, nextCard]
+	const previousIndex = filteredCards.findIndex(card => card.id === previousItemId)
+	if (previousIndex === -1) return [...filteredCards, nextCard]
+	return [
+		...filteredCards.slice(0, previousIndex + 1),
+		nextCard,
+		...filteredCards.slice(previousIndex + 1)
+	]
 }
 
 function upsertChatTranscript(
@@ -107,45 +145,60 @@ function upsertChatTranscript(
 	return nextList
 }
 
-function upsertStreamingCard(
-	existingList: UtteranceCard[],
-	patch: TranscriptionPatch,
-	fallbackDirection: UtteranceDirection
+function upsertTranslateSourcePatch(
+	cardList: UtteranceCard[],
+	patch: LiveTranslateSourcePatch,
+	translateSettings: TranslateSettings
 ): UtteranceCard[] {
-	const existingIndex = existingList.findIndex(item => item.id === patch.itemId)
-	const existingItem = existingIndex >= 0 ? existingList[existingIndex] : null
+	const existingCard = cardList.find(card => card.id === patch.itemId) ?? null
+	const fallbackDirection =
+		existingCard?.direction ??
+		(patch.inputOrigin === 'text' ? 'primary_to_secondary' : 'primary_to_secondary')
 
-	const mergedText =
-		patch.status === 'final' ? patch.text : `${existingItem?.sourceText ?? ''}${patch.text || ''}`
+	const sourceText =
+		patch.status === 'final' ? patch.text : `${existingCard?.sourceText ?? ''}${patch.text}`
 
-	const nextItem: UtteranceCard = {
-		...(existingItem ?? createEmptyUtteranceCard(patch.itemId, fallbackDirection)),
-		sourceText: mergedText,
-		status: patch.status === 'final' ? 'translating' : 'streaming'
+	const nextCard: UtteranceCard = {
+		...(existingCard ??
+			createEmptyUtteranceCard(patch.itemId, patch.inputOrigin, fallbackDirection, translateSettings)),
+		inputOrigin: patch.inputOrigin,
+		sourceText,
+		status:
+			patch.status === 'final'
+				? existingCard?.status === 'final'
+					? 'final'
+					: 'translating'
+				: 'streaming'
 	}
 
-	if (existingIndex === -1) {
-		return [...existingList, nextItem]
-	}
-
-	const nextList = existingList.slice()
-	nextList[existingIndex] = nextItem
-	return nextList
+	return insertCardByPreviousItemId(cardList, nextCard, patch.previousItemId)
 }
 
-function buildTranslationContextFromCards(cards: UtteranceCard[]): TranslationContextEntry[] {
-	const finalCards = cards.filter(
-		card => card.status === 'final' && card.translatedText.trim().length > 0
-	)
-	const boundedFinalCards = finalCards.slice(Math.max(0, finalCards.length - 200))
-
-	return boundedFinalCards.map(card => ({
-		direction: card.direction,
-		sourceLanguageCode: card.sourceLanguageCode,
-		sourceText: card.sourceText,
-		targetLanguageCode: card.targetLanguageCode,
-		translatedText: card.translatedText
-	}))
+function applyTranslateResultPatch(
+	cardList: UtteranceCard[],
+	patch: LiveTranslateResultPatch,
+	translateSettings: TranslateSettings
+): UtteranceCard[] {
+	const existingCard = cardList.find(card => card.id === patch.itemId) ?? null
+	const baseCard = existingCard
+		? (() => {
+				const { errorMessage: _errorMessage, responseId: _responseId, ...restCard } = existingCard
+				return restCard
+			})()
+		: createEmptyUtteranceCard(patch.itemId, patch.inputOrigin, patch.direction, translateSettings)
+	const nextCard: UtteranceCard = {
+		...baseCard,
+		direction: patch.direction,
+		inputOrigin: patch.inputOrigin,
+		sourceLanguageCode: patch.sourceLanguageCode,
+		sourceText: patch.sourceText.trim() ? patch.sourceText : (existingCard?.sourceText ?? ''),
+		status: patch.status,
+		targetLanguageCode: patch.targetLanguageCode,
+		translatedText: patch.translatedText,
+		...(patch.status === 'error' ? { errorMessage: patch.translatedText } : {}),
+		...(patch.responseId ? { responseId: patch.responseId } : {})
+	}
+	return insertCardByPreviousItemId(cardList, nextCard)
 }
 
 function getDirectionColorClass(direction: UtteranceDirection): string {
@@ -154,8 +207,6 @@ function getDirectionColorClass(direction: UtteranceDirection): string {
 			return 'var(--lilac-direction-primary)'
 		case 'secondary_to_primary':
 			return 'var(--lilac-direction-secondary)'
-		case 'to_target':
-			return 'var(--lilac-direction-transcribe)'
 		default:
 			return 'var(--lilac-ink-muted)'
 	}
@@ -163,24 +214,27 @@ function getDirectionColorClass(direction: UtteranceDirection): string {
 
 type LilacModeRuntimeContextValue = {
 	chatInstructions: string
+	chatSpeechOutputEnabled: boolean
 	chatTranscripts: ChatTranscriptMessage[]
 	chatTurnDelaySeconds: number
 	clearCurrentModeHistory: () => void
 	connectionState: ModeConnectionState
-	errorMessage: string | null
+	errorMessage: null | string
 	getDirectionColor: (direction: UtteranceDirection) => string
 	mode: LilacMode
 	reconnectCurrentMode: () => void
 	remoteAudioStream: MediaStream | null
 	setChatInstructions: (instructions: string) => void
+	setChatSpeechOutputEnabled: (speechOutputEnabled: boolean) => void
 	setChatTurnDelaySeconds: (seconds: number) => void
 	setMode: (mode: LilacMode) => void
-	setTranscribeSettings: (nextSettings: TranscribeSettings) => void
 	setTranslateSettings: (nextSettings: TranslateSettings) => void
-	transcribeCards: UtteranceCard[]
-	transcribeSettings: TranscribeSettings
+	setVoiceInputEnabled: (voiceInputEnabled: boolean) => void
+	submitChatTextInput: (text: string) => void
+	submitTranslateTextInput: (text: string) => void
 	translateCards: UtteranceCard[]
 	translateSettings: TranslateSettings
+	voiceInputEnabled: boolean
 }
 
 const LilacModeRuntimeContext = createContext<LilacModeRuntimeContextValue | null>(null)
@@ -188,46 +242,62 @@ const LilacModeRuntimeContext = createContext<LilacModeRuntimeContextValue | nul
 export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) {
 	const [mode, setModeState] = useState<LilacMode>('chat')
 	const [connectionState, setConnectionState] = useState<ModeConnectionState>('idle')
-	const [errorMessage, setErrorMessage] = useState<string | null>(null)
+	const [errorMessage, setErrorMessage] = useState<null | string>(null)
 	const [chatInstructions, setChatInstructionsState] = useState(defaultChatInstructions)
 	const [chatTurnDelaySeconds, setChatTurnDelaySecondsState] = useState(1.2)
 	const [chatTranscripts, setChatTranscripts] = useState<ChatTranscriptMessage[]>([])
 	const [translateSettings, setTranslateSettingsState] =
 		useState<TranslateSettings>(defaultTranslateSettings)
 	const [translateCards, setTranslateCards] = useState<UtteranceCard[]>([])
-	const [transcribeSettings, setTranscribeSettingsState] =
-		useState<TranscribeSettings>(defaultTranscribeSettings)
-	const [transcribeCards, setTranscribeCards] = useState<UtteranceCard[]>([])
+	const [globalAudioInputSettings, setGlobalAudioInputSettings] = useState<GlobalAudioInputSettings>(
+		defaultGlobalAudioInputSettings
+	)
+	const [chatOutputSettings, setChatOutputSettings] =
+		useState<ChatOutputSettings>(defaultChatOutputSettings)
 	const [remoteAudioStream, setRemoteAudioStream] = useState<MediaStream | null>(null)
 	const [isHydrated, setIsHydrated] = useState(false)
 	const [restartNonce, setRestartNonce] = useState(0)
 
 	const chatClientRef = useRef<ChatRealtimeClient | null>(null)
-	const transcriptionClientRef = useRef<TranscriptionSocketClient | null>(null)
-	const translateCardsRef = useRef<UtteranceCard[]>([])
-	const transcribeCardsRef = useRef<UtteranceCard[]>([])
-	const translationGenerationRef = useRef(0)
+	const liveTranslateClientRef = useRef<LiveTranslateRealtimeClient | null>(null)
+
+	const chatInstructionsRef = useRef(chatInstructions)
+	const chatTurnDelaySecondsRef = useRef(chatTurnDelaySeconds)
+	const translateSettingsRef = useRef(translateSettings)
+	const voiceInputEnabledRef = useRef(globalAudioInputSettings.voiceInputEnabled)
+	const chatSpeechOutputEnabledRef = useRef(chatOutputSettings.speechOutputEnabled)
 
 	useEffect(() => {
-		translateCardsRef.current = translateCards
-	}, [translateCards])
+		chatInstructionsRef.current = chatInstructions
+	}, [chatInstructions])
 
 	useEffect(() => {
-		transcribeCardsRef.current = transcribeCards
-	}, [transcribeCards])
+		chatTurnDelaySecondsRef.current = chatTurnDelaySeconds
+	}, [chatTurnDelaySeconds])
+
+	useEffect(() => {
+		translateSettingsRef.current = translateSettings
+	}, [translateSettings])
+
+	useEffect(() => {
+		voiceInputEnabledRef.current = globalAudioInputSettings.voiceInputEnabled
+	}, [globalAudioInputSettings.voiceInputEnabled])
+
+	useEffect(() => {
+		chatSpeechOutputEnabledRef.current = chatOutputSettings.speechOutputEnabled
+	}, [chatOutputSettings.speechOutputEnabled])
 
 	const stopAllClients = useCallback(() => {
 		chatClientRef.current?.stop()
 		chatClientRef.current = null
-		transcriptionClientRef.current?.stop()
-		transcriptionClientRef.current = null
+		liveTranslateClientRef.current?.stop()
+		liveTranslateClientRef.current = null
 		setRemoteAudioStream(null)
 	}, [])
 
 	const clearAllInMemoryState = useCallback(() => {
 		setChatTranscripts([])
 		setTranslateCards([])
-		setTranscribeCards([])
 	}, [])
 
 	const clearStateForMode = useCallback((nextMode: LilacMode) => {
@@ -238,159 +308,10 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			case 'translate':
 				setTranslateCards([])
 				return
-			case 'transcribe':
-				setTranscribeCards([])
-				return
 			default:
 				return
 		}
 	}, [])
-
-	const runTranslationForCard = useCallback(
-		async (currentMode: 'translate' | 'transcribe', cardId: string, sourceText: string) => {
-			const generationAtStart = translationGenerationRef.current
-			try {
-				if (currentMode === 'translate') {
-					const compactedContext = await compactTranslationContextAction({
-						context: buildTranslationContextFromCards(translateCardsRef.current)
-					})
-					const output = await translateUtteranceAction({
-						context: compactedContext.compactedContext,
-						settings: {
-							mode: 'translate',
-							primaryLanguageCode: translateSettings.primaryLanguageCode,
-							secondaryLanguageCode: translateSettings.secondaryLanguageCode
-						},
-						utteranceText: sourceText
-					})
-
-					if (generationAtStart !== translationGenerationRef.current) return
-
-					setTranslateCards(previousCards => {
-						const cardIndex = previousCards.findIndex(card => card.id === cardId)
-						if (cardIndex === -1) return previousCards
-						const nextCards = previousCards.slice()
-						const existingCard = nextCards[cardIndex]
-						if (!existingCard) return previousCards
-						nextCards[cardIndex] = {
-							...existingCard,
-							direction: output.direction,
-							sourceLanguageCode: output.detectedSourceLanguageCode,
-							status: 'final',
-							targetLanguageCode: output.targetLanguageCode,
-							translatedText: output.translatedText
-						}
-						return nextCards
-					})
-					return
-				}
-
-				const compactedContext = await compactTranslationContextAction({
-					context: buildTranslationContextFromCards(transcribeCardsRef.current)
-				})
-				const output = await translateUtteranceAction({
-					context: compactedContext.compactedContext,
-					settings: {
-						mode: 'transcribe',
-						targetLanguageCode: transcribeSettings.targetLanguageCode
-					},
-					utteranceText: sourceText
-				})
-
-				if (generationAtStart !== translationGenerationRef.current) return
-
-				setTranscribeCards(previousCards => {
-					const cardIndex = previousCards.findIndex(card => card.id === cardId)
-					if (cardIndex === -1) return previousCards
-					const nextCards = previousCards.slice()
-					const existingCard = nextCards[cardIndex]
-					if (!existingCard) return previousCards
-					nextCards[cardIndex] = {
-						...existingCard,
-						direction: output.direction,
-						sourceLanguageCode: output.detectedSourceLanguageCode,
-						status: 'final',
-						targetLanguageCode: output.targetLanguageCode,
-						translatedText: output.translatedText
-					}
-					return nextCards
-				})
-			} catch (error) {
-				if (generationAtStart !== translationGenerationRef.current) return
-				const message = error instanceof Error ? error.message : 'Translation failed'
-				switch (currentMode) {
-					case 'translate':
-						setTranslateCards(previousCards => {
-							const cardIndex = previousCards.findIndex(card => card.id === cardId)
-							if (cardIndex === -1) return previousCards
-							const nextCards = previousCards.slice()
-							const existingCard = nextCards[cardIndex]
-							if (!existingCard) return previousCards
-							nextCards[cardIndex] = {
-								...existingCard,
-								errorMessage: message,
-								status: 'error'
-							}
-							return nextCards
-						})
-						return
-					case 'transcribe':
-						setTranscribeCards(previousCards => {
-							const cardIndex = previousCards.findIndex(card => card.id === cardId)
-							if (cardIndex === -1) return previousCards
-							const nextCards = previousCards.slice()
-							const existingCard = nextCards[cardIndex]
-							if (!existingCard) return previousCards
-							nextCards[cardIndex] = {
-								...existingCard,
-								errorMessage: message,
-								status: 'error'
-							}
-							return nextCards
-						})
-						return
-					default:
-						return
-				}
-			}
-		},
-		[
-			transcribeSettings.targetLanguageCode,
-			translateSettings.primaryLanguageCode,
-			translateSettings.secondaryLanguageCode
-		]
-	)
-
-	const handleTranscriptionPatch = useCallback(
-		(currentMode: 'translate' | 'transcribe', patch: TranscriptionPatch) => {
-			const fallbackDirection: UtteranceDirection =
-				currentMode === 'translate' ? 'primary_to_secondary' : 'to_target'
-
-			switch (currentMode) {
-				case 'translate': {
-					setTranslateCards(previousCards =>
-						upsertStreamingCard(previousCards, patch, fallbackDirection)
-					)
-					if (patch.status === 'final' && patch.text.trim().length > 0) {
-						void runTranslationForCard('translate', patch.itemId, patch.text)
-					}
-					return
-				}
-				case 'transcribe': {
-					setTranscribeCards(previousCards =>
-						upsertStreamingCard(previousCards, patch, fallbackDirection)
-					)
-					if (patch.status === 'final' && patch.text.trim().length > 0) {
-						void runTranslationForCard('transcribe', patch.itemId, patch.text)
-					}
-					return
-				}
-				default:
-					return
-			}
-		},
-		[runTranslationForCard]
-	)
 
 	const startChatClient = useCallback(() => {
 		stopAllClients()
@@ -427,58 +348,61 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		})
 		chatClientRef.current = chatClient
 		void chatClient.start({
-			instructions: chatInstructions,
-			model: 'gpt-realtime',
-			turnDelaySeconds: chatTurnDelaySeconds,
-			voice: 'verse'
+			instructions: chatInstructionsRef.current,
+			model: defaultChatRealtimeModel,
+			speechOutputEnabled: chatSpeechOutputEnabledRef.current,
+			turnDelaySeconds: chatTurnDelaySecondsRef.current,
+			voice: 'verse',
+			voiceInputEnabled: voiceInputEnabledRef.current
 		})
-	}, [chatInstructions, chatTurnDelaySeconds, stopAllClients])
+	}, [stopAllClients])
 
-	const startTranscriptionClient = useCallback(
-		(currentMode: 'translate' | 'transcribe') => {
-			stopAllClients()
-			const transcriptionClient = new TranscriptionSocketClient({
-				onConnectionStateChange: state => {
-					switch (state) {
-						case 'connected':
-							setConnectionState('connected')
-							setErrorMessage(null)
-							return
-						case 'connecting':
-							setConnectionState('connecting')
-							return
-						case 'disconnected':
-							setConnectionState('idle')
-							return
-						case 'error':
-							setConnectionState('error')
-							return
-						default:
-							return
-					}
-				},
-				onError: message => {
-					setErrorMessage(message)
-					setConnectionState('error')
-				},
-				onPatch: patch => {
-					handleTranscriptionPatch(currentMode, patch)
+	const startLiveTranslateClient = useCallback(() => {
+		stopAllClients()
+		const translateClient = new LiveTranslateRealtimeClient({
+			onConnectionStateChange: state => {
+				switch (state) {
+					case 'connected':
+						setConnectionState('connected')
+						setErrorMessage(null)
+						return
+					case 'connecting':
+						setConnectionState('connecting')
+						return
+					case 'disconnected':
+						setConnectionState('idle')
+						return
+					case 'error':
+						setConnectionState('error')
+						return
+					default:
+						return
 				}
-			})
-			transcriptionClientRef.current = transcriptionClient
-			void transcriptionClient.start({
-				model: 'gpt-4o-transcribe',
-				turnDelaySeconds: chatTurnDelaySeconds,
-				...(currentMode === 'transcribe' ? { languageHint: transcribeSettings.targetLanguageCode } : {})
-			})
-		},
-		[
-			chatTurnDelaySeconds,
-			handleTranscriptionPatch,
-			stopAllClients,
-			transcribeSettings.targetLanguageCode
-		]
-	)
+			},
+			onError: message => {
+				setErrorMessage(message)
+				setConnectionState('error')
+			},
+			onResultPatch: patch => {
+				setTranslateCards(previousCards =>
+					applyTranslateResultPatch(previousCards, patch, translateSettingsRef.current)
+				)
+			},
+			onSourcePatch: patch => {
+				setTranslateCards(previousCards =>
+					upsertTranslateSourcePatch(previousCards, patch, translateSettingsRef.current)
+				)
+			}
+		})
+		liveTranslateClientRef.current = translateClient
+		void translateClient.start({
+			model: defaultChatRealtimeModel,
+			primaryLanguageCode: translateSettingsRef.current.primaryLanguageCode,
+			secondaryLanguageCode: translateSettingsRef.current.secondaryLanguageCode,
+			turnDelaySeconds: chatTurnDelaySecondsRef.current,
+			voiceInputEnabled: voiceInputEnabledRef.current
+		})
+	}, [stopAllClients])
 
 	const startModeRuntime = useCallback(
 		(nextMode: LilacMode) => {
@@ -489,30 +413,26 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 					startChatClient()
 					return
 				case 'translate':
-					startTranscriptionClient('translate')
-					return
-				case 'transcribe':
-					startTranscriptionClient('transcribe')
+					startLiveTranslateClient()
 					return
 				default:
 					return
 			}
 		},
-		[startChatClient, startTranscriptionClient]
+		[startChatClient, startLiveTranslateClient]
 	)
 
 	const setMode = useCallback(
 		(nextMode: LilacMode) => {
-			translationGenerationRef.current += 1
+			if (nextMode === mode) return
 			stopAllClients()
 			clearAllInMemoryState()
 			setModeState(nextMode)
 		},
-		[clearAllInMemoryState, stopAllClients]
+		[clearAllInMemoryState, mode, stopAllClients]
 	)
 
 	const reconnectCurrentMode = useCallback(() => {
-		translationGenerationRef.current += 1
 		stopAllClients()
 		clearStateForMode(mode)
 		setRestartNonce(previousNonce => previousNonce + 1)
@@ -530,19 +450,60 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		setChatTurnDelaySecondsState(normalizeTurnDelaySeconds(seconds))
 	}, [])
 
-	const setTranslateSettings = useCallback((nextSettings: TranslateSettings) => {
-		setTranslateSettingsState(nextSettings)
+	const setTranslateSettings = useCallback(
+		(nextSettings: TranslateSettings) => {
+			setTranslateSettingsState(nextSettings)
+			if (mode === 'translate') {
+				liveTranslateClientRef.current?.updateTranslateSettings({
+					primaryLanguageCode: nextSettings.primaryLanguageCode,
+					secondaryLanguageCode: nextSettings.secondaryLanguageCode,
+					turnDelaySeconds: chatTurnDelaySecondsRef.current
+				})
+			}
+		},
+		[mode]
+	)
+
+	const setVoiceInputEnabled = useCallback(
+		(voiceInputEnabled: boolean) => {
+			setGlobalAudioInputSettings({ voiceInputEnabled })
+			switch (mode) {
+				case 'chat':
+					void chatClientRef.current?.updateVoiceInputEnabled(voiceInputEnabled)
+					return
+				case 'translate':
+					void liveTranslateClientRef.current?.updateVoiceInputEnabled(voiceInputEnabled)
+					return
+				default:
+					return
+			}
+		},
+		[mode]
+	)
+
+	const setChatSpeechOutputEnabled = useCallback(
+		(speechOutputEnabled: boolean) => {
+			setChatOutputSettings({ speechOutputEnabled })
+			if (mode === 'chat') {
+				chatClientRef.current?.updateSpeechOutputEnabled(speechOutputEnabled)
+			}
+		},
+		[mode]
+	)
+
+	const submitChatTextInput = useCallback((text: string) => {
+		chatClientRef.current?.submitTextInput(text)
 	}, [])
 
-	const setTranscribeSettings = useCallback((nextSettings: TranscribeSettings) => {
-		setTranscribeSettingsState(nextSettings)
+	const submitTranslateTextInput = useCallback((text: string) => {
+		liveTranslateClientRef.current?.submitTextInput(text)
 	}, [])
 
 	useEffect(() => {
 		if (typeof window === 'undefined') return
 
 		const storedMode = window.localStorage.getItem(storageKeys.mode)
-		if (storedMode === 'chat' || storedMode === 'translate' || storedMode === 'transcribe') {
+		if (storedMode === 'chat' || storedMode === 'translate') {
 			setModeState(storedMode)
 		}
 
@@ -567,12 +528,21 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			})
 		}
 
-		const storedTranscribeTargetLanguageCode = window.localStorage.getItem(
-			storageKeys.transcribeTargetLanguage
-		)
-		if (storedTranscribeTargetLanguageCode) {
-			setTranscribeSettingsState({ targetLanguageCode: storedTranscribeTargetLanguageCode })
-		}
+		const storedVoiceInputEnabled = window.localStorage.getItem(storageKeys.voiceInputEnabled)
+		setGlobalAudioInputSettings({
+			voiceInputEnabled: parseStoredBoolean(
+				storedVoiceInputEnabled,
+				defaultGlobalAudioInputSettings.voiceInputEnabled
+			)
+		})
+
+		const storedSpeechOutputEnabled = window.localStorage.getItem(storageKeys.chatSpeechOutputEnabled)
+		setChatOutputSettings({
+			speechOutputEnabled: parseStoredBoolean(
+				storedSpeechOutputEnabled,
+				defaultChatOutputSettings.speechOutputEnabled
+			)
+		})
 
 		setIsHydrated(true)
 	}, [])
@@ -591,8 +561,27 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	useEffect(() => {
 		if (!isHydrated) return
 		window.localStorage.setItem(storageKeys.chatTurnDelaySeconds, String(chatTurnDelaySeconds))
-		if (mode === 'chat') chatClientRef.current?.updateTurnDelaySeconds(chatTurnDelaySeconds)
-	}, [chatTurnDelaySeconds, isHydrated, mode])
+		switch (mode) {
+			case 'chat':
+				chatClientRef.current?.updateTurnDelaySeconds(chatTurnDelaySeconds)
+				return
+			case 'translate':
+				liveTranslateClientRef.current?.updateTranslateSettings({
+					primaryLanguageCode: translateSettings.primaryLanguageCode,
+					secondaryLanguageCode: translateSettings.secondaryLanguageCode,
+					turnDelaySeconds: chatTurnDelaySeconds
+				})
+				return
+			default:
+				return
+		}
+	}, [
+		chatTurnDelaySeconds,
+		isHydrated,
+		mode,
+		translateSettings.primaryLanguageCode,
+		translateSettings.secondaryLanguageCode
+	])
 
 	useEffect(() => {
 		if (!isHydrated) return
@@ -609,15 +598,37 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	useEffect(() => {
 		if (!isHydrated) return
 		window.localStorage.setItem(
-			storageKeys.transcribeTargetLanguage,
-			transcribeSettings.targetLanguageCode
+			storageKeys.voiceInputEnabled,
+			String(globalAudioInputSettings.voiceInputEnabled)
 		)
-	}, [isHydrated, transcribeSettings.targetLanguageCode])
+		switch (mode) {
+			case 'chat':
+				void chatClientRef.current?.updateVoiceInputEnabled(globalAudioInputSettings.voiceInputEnabled)
+				return
+			case 'translate':
+				void liveTranslateClientRef.current?.updateVoiceInputEnabled(
+					globalAudioInputSettings.voiceInputEnabled
+				)
+				return
+			default:
+				return
+		}
+	}, [globalAudioInputSettings.voiceInputEnabled, isHydrated, mode])
+
+	useEffect(() => {
+		if (!isHydrated) return
+		window.localStorage.setItem(
+			storageKeys.chatSpeechOutputEnabled,
+			String(chatOutputSettings.speechOutputEnabled)
+		)
+		if (mode === 'chat') {
+			chatClientRef.current?.updateSpeechOutputEnabled(chatOutputSettings.speechOutputEnabled)
+		}
+	}, [chatOutputSettings.speechOutputEnabled, isHydrated, mode])
 
 	useEffect(() => {
 		if (!isHydrated) return
 		void restartNonce
-		translationGenerationRef.current += 1
 		startModeRuntime(mode)
 		return () => {
 			stopAllClients()
@@ -627,6 +638,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	const contextValue = useMemo<LilacModeRuntimeContextValue>(
 		() => ({
 			chatInstructions,
+			chatSpeechOutputEnabled: chatOutputSettings.speechOutputEnabled,
 			chatTranscripts,
 			chatTurnDelaySeconds,
 			clearCurrentModeHistory,
@@ -637,17 +649,20 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			reconnectCurrentMode,
 			remoteAudioStream,
 			setChatInstructions,
+			setChatSpeechOutputEnabled,
 			setChatTurnDelaySeconds,
 			setMode,
-			setTranscribeSettings,
 			setTranslateSettings,
-			transcribeCards,
-			transcribeSettings,
+			setVoiceInputEnabled,
+			submitChatTextInput,
+			submitTranslateTextInput,
 			translateCards,
-			translateSettings
+			translateSettings,
+			voiceInputEnabled: globalAudioInputSettings.voiceInputEnabled
 		}),
 		[
 			chatInstructions,
+			chatOutputSettings.speechOutputEnabled,
 			chatTranscripts,
 			chatTurnDelaySeconds,
 			clearCurrentModeHistory,
@@ -657,14 +672,16 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			reconnectCurrentMode,
 			remoteAudioStream,
 			setChatInstructions,
+			setChatSpeechOutputEnabled,
 			setChatTurnDelaySeconds,
 			setMode,
-			setTranscribeSettings,
 			setTranslateSettings,
-			transcribeCards,
-			transcribeSettings,
+			setVoiceInputEnabled,
+			submitChatTextInput,
+			submitTranslateTextInput,
 			translateCards,
-			translateSettings
+			translateSettings,
+			globalAudioInputSettings.voiceInputEnabled
 		]
 	)
 

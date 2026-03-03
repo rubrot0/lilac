@@ -5,6 +5,7 @@ import {
 	InputAudioTranscriptionCompletedEventSchema,
 	InputAudioTranscriptionDeltaEventSchema,
 	RealtimeBaseServerEventSchema,
+	RealtimeErrorEventSchema,
 	ResponseDoneEventSchema,
 	ResponseOutputAudioTranscriptDeltaEventSchema,
 	ResponseOutputItemAddedEventSchema,
@@ -27,8 +28,10 @@ export type ChatRealtimeClientState = 'connecting' | 'connected' | 'disconnected
 export type StartChatRealtimeClientInput = {
 	instructions: string
 	model: string
+	speechOutputEnabled: boolean
 	turnDelaySeconds: number
 	voice: string
+	voiceInputEnabled: boolean
 }
 
 export type ChatRealtimeClientCallbacks = {
@@ -38,33 +41,15 @@ export type ChatRealtimeClientCallbacks = {
 	onTranscriptPatch: (patch: ChatTranscriptPatch) => void
 }
 
-function float32ToPcm16(float32Samples: Float32Array): ArrayBuffer {
-	const pcm16 = new Int16Array(float32Samples.length)
-	for (let sampleIndex = 0; sampleIndex < float32Samples.length; sampleIndex += 1) {
-		const sample = Math.max(-1, Math.min(1, float32Samples[sampleIndex] ?? 0))
-		pcm16[sampleIndex] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
-	}
-	return pcm16.buffer
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-	let binary = ''
-	const bytes = new Uint8Array(buffer)
-	for (let index = 0; index < bytes.length; index += 1) {
-		binary += String.fromCharCode(bytes[index] ?? 0)
-	}
-	return window.btoa(binary)
-}
-
 export class ChatRealtimeClient {
 	private assistantItemIdByResponseId = new Map<string, string>()
 	private callbacks: ChatRealtimeClientCallbacks
-	private dataChannel: RTCDataChannel | null = null
+	private dataChannel: null | RTCDataChannel = null
 	private generation = 0
 	private localAudioStream: MediaStream | null = null
 	private pendingAudioTranscriptByResponseId = new Map<string, string>()
 	private pendingTextByResponseId = new Map<string, string>()
-	private peerConnection: RTCPeerConnection | null = null
+	private peerConnection: null | RTCPeerConnection = null
 
 	public constructor(callbacks: ChatRealtimeClientCallbacks) {
 		this.callbacks = callbacks
@@ -76,34 +61,19 @@ export class ChatRealtimeClient {
 		const generation = this.generation
 		this.callbacks.onConnectionStateChange('connecting')
 
-		let localAudioStream: MediaStream | null = null
-		let peerConnection: RTCPeerConnection | null = null
 		try {
 			const clientSecret = await createRealtimeClientSecretAction({
 				instructions: input.instructions,
 				model: input.model,
+				speechOutputEnabled: input.speechOutputEnabled,
 				turnDelaySeconds: input.turnDelaySeconds,
 				voice: input.voice
 			})
 
 			if (generation !== this.generation) return
 
-			localAudioStream = await navigator.mediaDevices.getUserMedia({
-				audio: {
-					autoGainControl: true,
-					echoCancellation: true,
-					noiseSuppression: true
-				}
-			})
-
-			if (generation !== this.generation) {
-				for (const track of localAudioStream.getTracks()) track.stop()
-				return
-			}
-
-			peerConnection = new RTCPeerConnection()
+			const peerConnection = new RTCPeerConnection()
 			this.peerConnection = peerConnection
-			this.localAudioStream = localAudioStream
 
 			peerConnection.addEventListener('track', event => {
 				const firstStream = event.streams[0]
@@ -111,8 +81,17 @@ export class ChatRealtimeClient {
 				this.callbacks.onRemoteStream(firstStream)
 			})
 
-			for (const track of localAudioStream.getTracks()) {
-				peerConnection.addTrack(track, localAudioStream)
+			if (input.voiceInputEnabled) {
+				await this.enableVoiceInput(generation)
+			}
+
+			if (generation !== this.generation) return
+
+			const localAudioStream = this.localAudioStream
+			if (localAudioStream) {
+				for (const track of localAudioStream.getTracks()) {
+					peerConnection.addTrack(track, localAudioStream)
+				}
 			}
 
 			const dataChannel = peerConnection.createDataChannel('oai-events')
@@ -188,11 +167,42 @@ export class ChatRealtimeClient {
 		this.callbacks.onConnectionStateChange('disconnected')
 	}
 
+	public submitTextInput(text: string): void {
+		const normalizedText = text.trim()
+		if (!normalizedText) return
+		this.sendEvent({
+			item: {
+				content: [
+					{
+						text: normalizedText,
+						type: 'input_text'
+					}
+				],
+				role: 'user',
+				type: 'message'
+			},
+			type: 'conversation.item.create'
+		})
+		this.sendEvent({
+			type: 'response.create'
+		})
+	}
+
 	public updateInstructions(instructions: string): void {
 		this.sendEvent({
 			session: { instructions },
 			type: 'session.update'
 		})
+	}
+
+	public updateSpeechOutputEnabled(speechOutputEnabled: boolean): void {
+		this.sendEvent({
+			session: {
+				output_modalities: [speechOutputEnabled ? 'audio' : 'text']
+			},
+			type: 'session.update'
+		})
+		if (!speechOutputEnabled) this.callbacks.onRemoteStream(null)
 	}
 
 	public updateTurnDelaySeconds(turnDelaySeconds: number): void {
@@ -210,6 +220,51 @@ export class ChatRealtimeClient {
 			},
 			type: 'session.update'
 		})
+	}
+
+	public async updateVoiceInputEnabled(voiceInputEnabled: boolean): Promise<void> {
+		if (!this.peerConnection) return
+		const generation = this.generation
+
+		if (!voiceInputEnabled) {
+			for (const sender of this.peerConnection.getSenders()) {
+				if (sender.track?.kind === 'audio') {
+					try {
+						this.peerConnection.removeTrack(sender)
+					} catch {}
+				}
+			}
+			for (const track of this.localAudioStream?.getTracks() ?? []) {
+				track.stop()
+			}
+			this.localAudioStream = null
+			return
+		}
+
+		const hasLocalAudioStream = this.localAudioStream !== null
+		if (hasLocalAudioStream) return
+		await this.enableVoiceInput(generation)
+		if (generation !== this.generation) return
+		const localAudioStream = this.localAudioStream
+		if (localAudioStream === null) return
+		for (const track of localAudioStream.getTracks()) {
+			this.peerConnection.addTrack(track, localAudioStream)
+		}
+	}
+
+	private async enableVoiceInput(generation: number): Promise<void> {
+		const stream = await navigator.mediaDevices.getUserMedia({
+			audio: {
+				autoGainControl: true,
+				echoCancellation: true,
+				noiseSuppression: true
+			}
+		})
+		if (generation !== this.generation) {
+			for (const track of stream.getTracks()) track.stop()
+			return
+		}
+		this.localAudioStream = stream
 	}
 
 	private emitTranscriptPatch(patch: ChatTranscriptPatch): void {
@@ -356,25 +411,21 @@ export class ChatRealtimeClient {
 				}
 				case 'response.done': {
 					const event = ResponseDoneEventSchema.parse(candidate)
-					this.finalizeAssistantForResponse(event.response_id)
+					this.finalizeAssistantForResponse(event.response_id ?? event.response?.id)
 					return
 				}
 				case 'error': {
-					const message =
-						typeof candidate === 'object' &&
-						candidate !== null &&
-						'error' in candidate &&
-						typeof (candidate as { error?: { message?: unknown } }).error?.message === 'string'
-							? ((candidate as { error?: { message?: string } }).error?.message ?? 'Realtime API error')
-							: 'Realtime API error'
-					this.callbacks.onError(message)
+					const event = RealtimeErrorEventSchema.parse(candidate)
+					this.callbacks.onError(event.error?.message || 'Realtime session error')
 					return
 				}
 				default:
 					return
 			}
 		} catch {
-			this.callbacks.onError('Failed to parse Realtime event payload')
+			// Ignore unrecognized event payloads; the Realtime stream can contain event shapes
+			// that this client does not need for transcript rendering.
+			return
 		}
 	}
 
@@ -384,16 +435,5 @@ export class ChatRealtimeClient {
 		try {
 			this.dataChannel.send(JSON.stringify(event))
 		} catch {}
-	}
-}
-
-export function buildInputAudioBufferAppendEventFromFloat32Audio(float32Audio: Float32Array): {
-	audio: string
-	type: 'input_audio_buffer.append'
-} {
-	const pcm16Buffer = float32ToPcm16(float32Audio)
-	return {
-		audio: arrayBufferToBase64(pcm16Buffer),
-		type: 'input_audio_buffer.append'
 	}
 }

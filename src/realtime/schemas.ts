@@ -1,10 +1,15 @@
 import { z } from 'zod'
 
+import {
+	ChatRealtimeModelSchema,
+	defaultChatRealtimeModel,
+	defaultTranscriptionModel
+} from '@/realtime/modelConfig'
 import { languageOptions } from '@/realtime/sessionTypes'
 
 const languageCodeValues = languageOptions.map(option => option.code)
 
-const LanguageCodeSchema = z
+export const LanguageCodeSchema = z
 	.string()
 	.min(2)
 	.transform(value => value.trim().toLowerCase())
@@ -31,7 +36,8 @@ const RealtimeSessionClientSecretResponseSchema = z.object({
 
 export const CreateRealtimeClientSecretActionInputSchema = z.object({
 	instructions: z.string().max(12000).optional(),
-	model: z.string().default('gpt-realtime'),
+	model: ChatRealtimeModelSchema.default(defaultChatRealtimeModel),
+	speechOutputEnabled: z.boolean().default(true),
 	turnDelaySeconds: z.number().min(0.2).max(6).default(1.2),
 	voice: z.string().default('verse')
 })
@@ -41,58 +47,24 @@ export const CreateRealtimeClientSecretActionOutputSchema = z.object({
 	value: z.string().min(1)
 })
 
-export const CreateRealtimeTranscriptionSessionActionInputSchema = z.object({
-	languageHint: LanguageCodeSchema.optional(),
-	model: z.string().default('gpt-4o-transcribe'),
+export const CreateTranslateRealtimeClientSecretActionInputSchema = z.object({
+	model: ChatRealtimeModelSchema.default(defaultChatRealtimeModel),
+	primaryLanguageCode: KnownLanguageCodeSchema,
+	secondaryLanguageCode: KnownLanguageCodeSchema,
 	turnDelaySeconds: z.number().min(0.2).max(6).default(1.2)
 })
 
-export const CreateRealtimeTranscriptionSessionActionOutputSchema = z.object({
+export const CreateTranslateRealtimeClientSecretActionOutputSchema = z.object({
 	expiresAt: z.number(),
 	value: z.string().min(1)
 })
 
-export const TranslationContextEntrySchema = z.object({
-	direction: z.enum(['primary_to_secondary', 'secondary_to_primary', 'to_target']),
+export const PublishTranslationToolArgumentsSchema = z.object({
+	direction: z.enum(['primary_to_secondary', 'secondary_to_primary']),
 	sourceLanguageCode: LanguageCodeSchema,
 	sourceText: z.string().min(1),
 	targetLanguageCode: LanguageCodeSchema,
 	translatedText: z.string().min(1)
-})
-
-const TranslateModeSettingsSchema = z.object({
-	mode: z.literal('translate'),
-	primaryLanguageCode: KnownLanguageCodeSchema,
-	secondaryLanguageCode: KnownLanguageCodeSchema
-})
-
-const TranscribeModeSettingsSchema = z.object({
-	mode: z.literal('transcribe'),
-	targetLanguageCode: KnownLanguageCodeSchema
-})
-
-export const TranslateUtteranceActionInputSchema = z.object({
-	context: z.array(TranslationContextEntrySchema).max(16).default([]),
-	model: z.string().default('gpt-4.1-mini'),
-	settings: z.union([TranslateModeSettingsSchema, TranscribeModeSettingsSchema]),
-	utteranceText: z.string().min(1).max(5000)
-})
-
-export const TranslateUtteranceActionOutputSchema = z.object({
-	detectedSourceLanguageCode: LanguageCodeSchema,
-	direction: z.enum(['primary_to_secondary', 'secondary_to_primary', 'to_target']),
-	targetLanguageCode: LanguageCodeSchema,
-	translatedText: z.string().min(1)
-})
-
-export const CompactTranslationContextActionInputSchema = z.object({
-	context: z.array(TranslationContextEntrySchema).max(200),
-	model: z.string().default('gpt-4.1-mini')
-})
-
-export const CompactTranslationContextActionOutputSchema = z.object({
-	compactedContext: z.array(TranslationContextEntrySchema),
-	performedCompaction: z.boolean()
 })
 
 export const RealtimeBaseServerEventSchema = z
@@ -101,9 +73,22 @@ export const RealtimeBaseServerEventSchema = z
 	})
 	.passthrough()
 
+export const RealtimeErrorEventSchema = z
+	.object({
+		error: z
+			.object({
+				message: z.string().optional()
+			})
+			.passthrough()
+			.optional(),
+		type: z.literal('error')
+	})
+	.passthrough()
+
 export const InputAudioBufferCommittedEventSchema = z
 	.object({
 		item_id: z.string(),
+		previous_item_id: z.string().nullable().optional(),
 		type: z.literal('input_audio_buffer.committed')
 	})
 	.passthrough()
@@ -151,13 +136,6 @@ export const ResponseOutputAudioTranscriptDeltaEventSchema = z
 	})
 	.passthrough()
 
-export const ResponseDoneEventSchema = z
-	.object({
-		response_id: z.string().optional(),
-		type: z.literal('response.done')
-	})
-	.passthrough()
-
 export const ResponseOutputItemAddedEventSchema = z
 	.object({
 		item: z
@@ -167,6 +145,32 @@ export const ResponseOutputItemAddedEventSchema = z
 			.passthrough(),
 		response_id: z.string().optional(),
 		type: z.literal('response.output_item.added')
+	})
+	.passthrough()
+
+const ResponseDoneFunctionCallItemSchema = z
+	.object({
+		arguments: z.string().optional(),
+		call_id: z.string().optional(),
+		id: z.string().optional(),
+		name: z.string().optional(),
+		type: z.string()
+	})
+	.passthrough()
+
+export const ResponseDoneEventSchema = z
+	.object({
+		response: z
+			.object({
+				id: z.string().optional(),
+				metadata: z.record(z.string(), z.unknown()).optional(),
+				output: z.array(ResponseDoneFunctionCallItemSchema).optional(),
+				status: z.string().optional()
+			})
+			.passthrough()
+			.optional(),
+		response_id: z.string().optional(),
+		type: z.literal('response.done')
 	})
 	.passthrough()
 
@@ -189,3 +193,5 @@ export function parseClientSecretResponse(value: unknown): { expiresAt: number; 
 
 	throw new Error('OpenAI response did not include an ephemeral client secret')
 }
+
+export const defaultInputTranscriptionModel = defaultTranscriptionModel
