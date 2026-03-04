@@ -1,5 +1,6 @@
 'use client'
 
+import { Mic, MicOff, Volume2, VolumeX } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 
 import ChatMode from '@/app/(app)/ChatMode'
@@ -303,9 +304,11 @@ export default function ModeShell() {
 								variant="outline"
 								data-testid="header-voice-input-toggle"
 								onClick={() => setVoiceInputEnabled(!voiceInputEnabled)}
-								className="h-9 rounded-full px-3 text-[11px] uppercase tracking-[0.12em]"
+								className="h-9 w-9 rounded-full p-0"
+								aria-label={voiceInputEnabled ? 'Disable microphone' : 'Enable microphone'}
+								title={voiceInputEnabled ? 'Mic on' : 'Mic off'}
 							>
-								{voiceInputEnabled ? 'Mic On' : 'Mic Off'}
+								{voiceInputEnabled ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
 							</Button>
 
 							{mode === 'chat' ? (
@@ -314,9 +317,15 @@ export default function ModeShell() {
 									variant="outline"
 									data-testid="header-chat-speech-toggle"
 									onClick={() => setChatSpeechOutputEnabled(!chatSpeechOutputEnabled)}
-									className="h-9 rounded-full px-3 text-[11px] uppercase tracking-[0.12em]"
+									className="h-9 w-9 rounded-full p-0"
+									aria-label={chatSpeechOutputEnabled ? 'Disable speech output' : 'Enable speech output'}
+									title={chatSpeechOutputEnabled ? 'Speech on' : 'Speech off'}
 								>
-									{chatSpeechOutputEnabled ? 'Speech On' : 'Speech Off'}
+									{chatSpeechOutputEnabled ? (
+										<Volume2 className="h-4 w-4" />
+									) : (
+										<VolumeX className="h-4 w-4" />
+									)}
 								</Button>
 							) : null}
 

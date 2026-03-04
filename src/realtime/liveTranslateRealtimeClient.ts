@@ -49,7 +49,12 @@ export type LiveTranslateRealtimeClientCallbacks = {
 type PendingResponseContext = {
 	inputOrigin: 'audio' | 'text'
 	itemId: string
+	retryCount: number
+	sourceText: string
 }
+
+const translationResponseTimeoutMilliseconds = 16_000
+const maxMissingToolCallRetryCount = 1
 
 function createTranslateInstructions(
 	myLanguageCode: string,
@@ -174,7 +179,9 @@ export class LiveTranslateRealtimeClient {
 	private completedToolArgumentsByResponseId = new Map<string, string>()
 	private dataChannel: null | RTCDataChannel = null
 	private generation = 0
+	private pendingRequestIdQueue: string[] = []
 	private pendingResponseContextByRequestId = new Map<string, PendingResponseContext>()
+	private pendingResponseTimeoutByRequestId = new Map<string, number>()
 	private peerConnection: null | RTCPeerConnection = null
 	private sourceItemOrder: string[] = []
 	private state: LiveTranslateRealtimeClientState = 'disconnected'
@@ -257,6 +264,11 @@ export class LiveTranslateRealtimeClient {
 	public stop(): void {
 		this.generation += 1
 		this.completedToolArgumentsByResponseId.clear()
+		this.pendingResponseTimeoutByRequestId.forEach(timeoutId => {
+			window.clearTimeout(timeoutId)
+		})
+		this.pendingResponseTimeoutByRequestId.clear()
+		this.pendingRequestIdQueue = []
 		this.pendingResponseContextByRequestId.clear()
 		this.sourceItemOrder = []
 
@@ -294,7 +306,7 @@ export class LiveTranslateRealtimeClient {
 			},
 			type: 'conversation.item.create'
 		})
-		this.requestTranslationResponse(input.itemId, input.inputOrigin)
+		this.requestTranslationResponse(input.itemId, input.inputOrigin, normalizedText)
 	}
 
 	public updateTranslateSettings(settings: LiveTranslateSettings): void {
@@ -333,11 +345,7 @@ export class LiveTranslateRealtimeClient {
 		const sourceItemIdFromMetadata = parseStringValue(metadata.source_item_id)
 		const inputOriginFromMetadata = parseStringValue(metadata.input_origin)
 
-		const pendingContext = requestId
-			? (this.pendingResponseContextByRequestId.get(requestId) ?? null)
-			: null
-		if (requestId) this.pendingResponseContextByRequestId.delete(requestId)
-
+		const pendingContext = this.resolvePendingContext(requestId)
 		const sourceItemId = sourceItemIdFromMetadata ?? pendingContext?.itemId ?? null
 		const rawInputOrigin = inputOriginFromMetadata ?? pendingContext?.inputOrigin ?? null
 		const inputOrigin: 'audio' | 'text' = rawInputOrigin === 'text' ? 'text' : 'audio'
@@ -358,16 +366,26 @@ export class LiveTranslateRealtimeClient {
 			inferredToolArguments
 
 		if (!toolArguments) {
-			if (responseStatus && responseStatus !== 'completed') return
+			if (pendingContext && pendingContext.retryCount < maxMissingToolCallRetryCount) {
+				this.requestTranslationResponse(
+					pendingContext.itemId,
+					pendingContext.inputOrigin,
+					pendingContext.sourceText,
+					pendingContext.retryCount + 1
+				)
+				return
+			}
 			this.callbacks.onResultPatch({
 				direction: 'my_to_target',
 				inputOrigin,
 				itemId: sourceItemId,
 				sourceLanguageCode: 'und',
-				sourceText: '',
+				sourceText: pendingContext?.sourceText ?? '',
 				status: 'error',
 				targetLanguageCode: 'und',
-				translatedText: 'No valid publish_translation tool call was returned.',
+				translatedText: responseStatus
+					? `No valid publish_translation tool call was returned (${responseStatus}).`
+					: 'No valid publish_translation tool call was returned.',
 				...(responseId ? { responseId } : {})
 			})
 			return
@@ -393,7 +411,7 @@ export class LiveTranslateRealtimeClient {
 				inputOrigin,
 				itemId: sourceItemId,
 				sourceLanguageCode: 'und',
-				sourceText: '',
+				sourceText: pendingContext?.sourceText ?? '',
 				status: 'error',
 				targetLanguageCode: 'und',
 				translatedText: 'Tool arguments were malformed and could not be parsed.',
@@ -476,9 +494,80 @@ export class LiveTranslateRealtimeClient {
 		}
 	}
 
-	private requestTranslationResponse(itemId: string, inputOrigin: 'audio' | 'text'): void {
+	private clearPendingRequestTimeout(requestId: string): void {
+		const timeoutId = this.pendingResponseTimeoutByRequestId.get(requestId)
+		if (typeof timeoutId === 'number') {
+			window.clearTimeout(timeoutId)
+		}
+		this.pendingResponseTimeoutByRequestId.delete(requestId)
+	}
+
+	private removePendingRequestIdFromQueue(requestId: string): void {
+		const requestIndex = this.pendingRequestIdQueue.indexOf(requestId)
+		if (requestIndex === -1) return
+		this.pendingRequestIdQueue.splice(requestIndex, 1)
+	}
+
+	private resolvePendingContext(requestId: null | string): null | PendingResponseContext {
+		if (requestId) {
+			const directContext = this.pendingResponseContextByRequestId.get(requestId) ?? null
+			this.pendingResponseContextByRequestId.delete(requestId)
+			this.clearPendingRequestTimeout(requestId)
+			this.removePendingRequestIdFromQueue(requestId)
+			if (directContext) return directContext
+		}
+
+		const fallbackRequestId = this.pendingRequestIdQueue.shift()
+		if (!fallbackRequestId) return null
+		const fallbackContext = this.pendingResponseContextByRequestId.get(fallbackRequestId) ?? null
+		this.pendingResponseContextByRequestId.delete(fallbackRequestId)
+		this.clearPendingRequestTimeout(fallbackRequestId)
+		return fallbackContext
+	}
+
+	private requestTranslationResponse(
+		itemId: string,
+		inputOrigin: 'audio' | 'text',
+		sourceText: string,
+		retryCount = 0
+	): void {
 		const requestId = crypto.randomUUID()
-		this.pendingResponseContextByRequestId.set(requestId, { inputOrigin, itemId })
+		this.pendingResponseContextByRequestId.set(requestId, {
+			inputOrigin,
+			itemId,
+			retryCount,
+			sourceText
+		})
+		this.pendingRequestIdQueue.push(requestId)
+		const timeoutId = window.setTimeout(() => {
+			const pendingContext = this.pendingResponseContextByRequestId.get(requestId)
+			if (!pendingContext) return
+			this.pendingResponseContextByRequestId.delete(requestId)
+			this.removePendingRequestIdFromQueue(requestId)
+			this.clearPendingRequestTimeout(requestId)
+
+			if (pendingContext.retryCount < maxMissingToolCallRetryCount) {
+				this.requestTranslationResponse(
+					pendingContext.itemId,
+					pendingContext.inputOrigin,
+					pendingContext.sourceText,
+					pendingContext.retryCount + 1
+				)
+				return
+			}
+
+			this.callbacks.onResultPatch({
+				direction: 'my_to_target',
+				inputOrigin: pendingContext.inputOrigin,
+				itemId: pendingContext.itemId,
+				sourceLanguageCode: 'und',
+				sourceText: pendingContext.sourceText,
+				status: 'error',
+				targetLanguageCode: 'und',
+				translatedText: 'Translation timed out before tool output was returned.'
+			})
+		}, translationResponseTimeoutMilliseconds)
+		this.pendingResponseTimeoutByRequestId.set(requestId, timeoutId)
 		this.sendEvent({
 			response: {
 				conversation: 'none',
@@ -488,6 +577,7 @@ export class LiveTranslateRealtimeClient {
 				metadata: {
 					input_origin: inputOrigin,
 					request_id: requestId,
+					retry_count: retryCount,
 					source_item_id: itemId
 				},
 				output_modalities: ['text'],

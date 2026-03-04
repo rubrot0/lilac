@@ -407,6 +407,9 @@ export default function TranslateMode() {
 								card.targetLanguageCode
 							)}`
 							const isTranslating = card.status === 'streaming' || card.status === 'translating'
+							const translationText =
+								card.translatedText.trim() ||
+								(card.status === 'error' ? (card.errorMessage ?? 'Translation failed.') : 'Translating…')
 							return (
 								<article
 									key={card.id}
@@ -414,12 +417,12 @@ export default function TranslateMode() {
 									className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] p-3"
 								>
 									<div className="mb-2 flex items-center justify-between gap-2">
-										<div
-											className="font-semibold text-sm tracking-[0.03em]"
+										<p
+											className="font-semibold text-xs uppercase tracking-[0.08em]"
 											style={{ color: getDirectionColor(card.direction) }}
 										>
 											{routeLabel}
-										</div>
+										</p>
 										{isTranslating ? (
 											<div className="inline-flex items-center gap-1">
 												<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--lilac-direction-secondary)]" />
@@ -429,34 +432,19 @@ export default function TranslateMode() {
 										) : null}
 									</div>
 
-									<div className="space-y-2">
-										<div className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-3 py-2">
-											<div className="mb-1 font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
-												Heard ({resolveLanguageLabel(card.sourceLanguageCode)})
-											</div>
-											<p
-												className="whitespace-pre-wrap break-words text-[var(--lilac-ink)] text-sm leading-relaxed"
-												data-testid={`translate-card-source-${card.id}`}
-											>
-												{card.sourceText.trim() || '…'}
-											</p>
-										</div>
-
-										<div className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-3 py-2">
-											<div className="mb-1 font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
-												Translation ({resolveLanguageLabel(card.targetLanguageCode)})
-											</div>
-											<p
-												className="whitespace-pre-wrap break-words text-[var(--lilac-ink)] text-sm leading-relaxed"
-												data-testid={`translate-card-target-${card.id}`}
-											>
-												{card.translatedText.trim() ||
-													(card.status === 'error'
-														? (card.errorMessage ?? 'Translation failed.')
-														: 'Translating…')}
-											</p>
-										</div>
-									</div>
+									<p
+										className="whitespace-pre-wrap break-words text-[1.18rem] text-[var(--lilac-ink)] leading-snug sm:text-[1.25rem]"
+										data-testid={`translate-card-target-${card.id}`}
+									>
+										{translationText}
+									</p>
+									<p
+										className="mt-2 whitespace-pre-wrap break-words text-[var(--lilac-ink-muted)] text-sm leading-relaxed"
+										data-testid={`translate-card-source-${card.id}`}
+									>
+										<span className="mr-1 font-semibold text-[10px] uppercase tracking-[0.12em]">Heard:</span>
+										{card.sourceText.trim() || '…'}
+									</p>
 								</article>
 							)
 						})
