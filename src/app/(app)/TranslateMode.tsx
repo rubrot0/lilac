@@ -406,24 +406,32 @@ export default function TranslateMode() {
 							const routeLabel = `${resolveLanguageLabel(card.sourceLanguageCode)} → ${resolveLanguageLabel(
 								card.targetLanguageCode
 							)}`
-							const isTranslating = card.status === 'streaming' || card.status === 'translating'
-							const translationText =
-								card.translatedText.trim() ||
-								(card.status === 'error' ? (card.errorMessage ?? 'Translation failed.') : 'Translating…')
+							const finalTranslationText = card.translatedText.trim()
+							const draftTranslationText = card.draftTranslatedText?.trim() ?? ''
+							const isStreamingDraft =
+								card.renderState === 'draft' || card.status === 'streaming' || card.status === 'translating'
+							const translationText = finalTranslationText
+								? finalTranslationText
+								: draftTranslationText
+									? draftTranslationText
+									: card.status === 'error'
+										? (card.errorMessage ?? 'Translation failed.')
+										: 'Listening…'
 							return (
 								<article
 									key={card.id}
 									data-testid={`translate-card-${card.id}`}
-									className="rounded-lg border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] px-3 py-2.5"
+									data-render-state={card.renderState}
+									className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] px-3 py-2.5"
 								>
-									<div className="mb-1.5 flex items-center justify-between gap-2">
+									<div className="mb-1 flex items-center justify-between gap-2">
 										<p
-											className="font-semibold text-[0.83rem] tracking-[0.02em]"
+											className="font-semibold text-[0.78rem] tracking-[0.03em]"
 											style={{ color: getDirectionColor(card.direction) }}
 										>
 											{routeLabel}
 										</p>
-										{isTranslating ? (
+										{isStreamingDraft ? (
 											<div className="inline-flex items-center gap-1">
 												<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--lilac-direction-secondary)]" />
 												<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--lilac-direction-secondary)] [animation-delay:120ms]" />
@@ -433,13 +441,13 @@ export default function TranslateMode() {
 									</div>
 
 									<p
-										className="whitespace-pre-wrap break-words text-[1.05rem] text-[var(--lilac-ink)] leading-snug sm:text-[1.14rem]"
+										className="whitespace-pre-wrap break-words text-[1.1rem] text-[var(--lilac-ink)] leading-snug sm:text-[1.2rem]"
 										data-testid={`translate-card-target-${card.id}`}
 									>
 										{translationText}
 									</p>
 									<p
-										className="mt-1.5 whitespace-pre-wrap break-words text-[0.8rem] text-[var(--lilac-ink-muted)] leading-relaxed"
+										className="mt-1 whitespace-pre-wrap break-words text-[0.78rem] text-[var(--lilac-ink-muted)] leading-relaxed"
 										data-testid={`translate-card-source-${card.id}`}
 									>
 										<span className="mr-1 font-semibold text-[10px] uppercase tracking-[0.12em]">Heard:</span>

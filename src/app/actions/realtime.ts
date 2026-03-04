@@ -1,6 +1,9 @@
 'use server'
 
-import { defaultTranscriptionModel } from '@/realtime/modelConfig'
+import {
+	defaultTranscriptionModel,
+	resolveTranscriptionModelForAsrProfile
+} from '@/realtime/modelConfig'
 import {
 	CreateRealtimeClientSecretActionInputSchema,
 	CreateRealtimeClientSecretActionOutputSchema,
@@ -201,6 +204,16 @@ export async function createTranslateRealtimeClientSecretAction(input: unknown):
 			seconds: 600
 		},
 		session: {
+			audio: {
+				input: {
+					turn_detection: {
+						create_response: false,
+						eagerness: 'high',
+						interrupt_response: false,
+						type: 'semantic_vad'
+					}
+				}
+			},
 			instructions,
 			model: parsedInput.model,
 			output_modalities: ['text'],
@@ -219,16 +232,17 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 	value: string
 }> {
 	const parsedInput = CreateRealtimeTranscriptionSessionActionInputSchema.parse(input)
-	void parsedInput
+	const transcriptionModel = resolveTranscriptionModelForAsrProfile(parsedInput.asrProfile)
 
 	const payload = await postOpenAi('/realtime/transcription_sessions', {
+		include: ['item.input_audio_transcription.logprobs'],
 		input_audio_format: 'pcm16',
 		input_audio_transcription: {
-			model: defaultTranscriptionModel,
+			model: transcriptionModel,
 			prompt: 'Transcribe spoken audio faithfully. Preserve punctuation and proper nouns.'
 		},
 		turn_detection: {
-			eagerness: 'high',
+			eagerness: parsedInput.turnEagerness,
 			type: 'semantic_vad'
 		}
 	})

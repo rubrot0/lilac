@@ -3,7 +3,9 @@ import { isValidLanguageCode, normalizeLanguageCode } from '@/realtime/languageC
 import {
 	ChatRealtimeModelSchema,
 	defaultChatRealtimeModel,
-	defaultTranscriptionModel
+	defaultTranscriptionAsrProfile,
+	defaultTranscriptionModel,
+	TranscriptionAsrProfileSchema
 } from '@/realtime/modelConfig'
 
 export const LanguageCodeSchema = z
@@ -58,8 +60,10 @@ export const CreateTranslateRealtimeClientSecretActionOutputSchema = z.object({
 })
 
 export const CreateRealtimeTranscriptionSessionActionInputSchema = z.object({
+	asrProfile: TranscriptionAsrProfileSchema.default(defaultTranscriptionAsrProfile),
 	myLanguageCode: LanguageCodeSchema,
-	translateToLanguageCode: LanguageCodeSchema
+	translateToLanguageCode: LanguageCodeSchema,
+	turnEagerness: z.enum(['low', 'medium', 'high']).default('high')
 })
 
 export const CreateRealtimeTranscriptionSessionActionOutputSchema = z.object({
@@ -124,6 +128,15 @@ export const InputAudioTranscriptionDeltaEventSchema = z
 export const InputAudioTranscriptionCompletedEventSchema = z
 	.object({
 		item_id: z.string(),
+		logprobs: z
+			.array(
+				z
+					.object({
+						logprob: z.number().optional()
+					})
+					.passthrough()
+			)
+			.optional(),
 		transcript: z.string(),
 		type: z.literal('conversation.item.input_audio_transcription.completed')
 	})
@@ -252,6 +265,23 @@ export const ResponseFunctionCallArgumentsDoneEventSchema = z
 	})
 	.passthrough()
 
+export const ResponseFunctionCallArgumentsDeltaEventSchema = z
+	.object({
+		delta: z.string().optional(),
+		item: z
+			.object({
+				arguments: z.string().optional(),
+				name: z.string().optional(),
+				type: z.string().optional()
+			})
+			.passthrough()
+			.optional(),
+		name: z.string().optional(),
+		response_id: z.string().optional(),
+		type: z.literal('response.function_call_arguments.delta')
+	})
+	.passthrough()
+
 const ResponseDoneFunctionCallItemSchema = z
 	.object({
 		arguments: z.string().optional(),
@@ -278,6 +308,13 @@ export const ResponseDoneEventSchema = z
 		type: z.literal('response.done')
 	})
 	.passthrough()
+
+export const TranslationDraftDeltaSchema = z.object({
+	draftSequence: z.number().int().min(0),
+	itemId: z.string().min(1),
+	responseId: z.string().optional(),
+	translatedText: z.string()
+})
 
 export function parseClientSecretResponse(value: unknown): { expiresAt: number; value: string } {
 	const directSecret = RealtimeClientSecretResponseSchema.safeParse(value)

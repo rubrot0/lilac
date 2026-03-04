@@ -7,8 +7,12 @@ import {
 	RealtimeErrorEventSchema,
 	ResponseCreatedEventSchema,
 	ResponseDoneEventSchema,
+	ResponseFunctionCallArgumentsDeltaEventSchema,
 	ResponseFunctionCallArgumentsDoneEventSchema,
-	ResponseOutputItemDoneEventSchema
+	ResponseOutputItemDoneEventSchema,
+	ResponseOutputTextDeltaEventSchema,
+	ResponseOutputTextDoneEventSchema,
+	TranslationDraftDeltaSchema
 } from '@/realtime/schemas'
 import type { UtteranceDirection } from '@/realtime/sessionTypes'
 
@@ -29,6 +33,18 @@ export type TranslateInputPayload = {
 	text: string
 }
 
+export type TranslateDraftInputPayload = TranslateInputPayload & {
+	draftSequence: number
+}
+
+export type LiveTranslateDraftPatch = {
+	draftSequence: number
+	inputOrigin: 'audio' | 'text'
+	itemId: string
+	responseId?: string
+	translatedText: string
+}
+
 export type LiveTranslateResultPatch = {
 	direction: UtteranceDirection
 	inputOrigin: 'audio' | 'text'
@@ -43,17 +59,23 @@ export type LiveTranslateResultPatch = {
 
 export type LiveTranslateRealtimeClientCallbacks = {
 	onConnectionStateChange: (state: LiveTranslateRealtimeClientState) => void
+	onDraftDeltaPatch: (patch: LiveTranslateDraftPatch) => void
+	onDraftDonePatch: (patch: LiveTranslateDraftPatch) => void
 	onError: (message: string) => void
 	onResultPatch: (patch: LiveTranslateResultPatch) => void
 }
 
 type PendingResponseContext = {
+	draftSequence?: number
 	inputOrigin: 'audio' | 'text'
 	itemId: string
+	requestId: string
+	requestKind: 'draft' | 'final'
 	sourceText: string
 }
 
-const translationResponseTimeoutMilliseconds = 8_000
+const finalTranslationResponseTimeoutMilliseconds = 8_000
+const draftTranslationResponseTimeoutMilliseconds = 5_000
 const channelConnectTimeoutMilliseconds = 7_000
 
 function createTranslateInstructions(
@@ -72,6 +94,17 @@ function createTranslateInstructions(
 		'Never produce assistant text outside the function call.',
 		'Preserve speaker intent, tone, and named entities.',
 		'No summaries, no commentary, no extra fields.'
+	].join('\n')
+}
+
+function createDraftInstructions(myLanguageCode: string, translateToLanguageCode: string): string {
+	return [
+		'You are Lilac, a low-latency live subtitle translator.',
+		`I speak language code: ${myLanguageCode}.`,
+		`Translate to language code: ${translateToLanguageCode}.`,
+		'Translate the partial utterance immediately.',
+		'Output only translated text.',
+		'No explanations. No labels. No JSON.'
 	].join('\n')
 }
 
@@ -175,18 +208,24 @@ function tryExtractToolArgumentsFromResponseOutput(
 }
 
 export class LiveTranslateRealtimeClient {
-	private activeRequestId: null | string = null
 	private callbacks: LiveTranslateRealtimeClientCallbacks
 	private connectTimeoutId: null | number = null
-	private completedToolArgumentsByResponseId = new Map<string, string>()
 	private dataChannel: null | RTCDataChannel = null
+	private draftRequestIdsByItemId = new Map<string, Set<string>>()
+	private draftResponseTextByResponseId = new Map<string, string>()
 	private generation = 0
-	private pendingInputQueue: PendingResponseContext[] = []
+	private latestDraftSequenceByItemId = new Map<string, number>()
+	private pendingRequestContextByRequestId = new Map<string, PendingResponseContext>()
 	private pendingRequestIdByResponseId = new Map<string, string>()
-	private pendingResponseContextByRequestId = new Map<string, PendingResponseContext>()
-	private pendingResponseTimeoutByRequestId = new Map<string, number>()
+	private pendingRequestTimeoutByRequestId = new Map<string, number>()
 	private peerConnection: null | RTCPeerConnection = null
+	private settings: LiveTranslateSettings = {
+		myLanguageCode: 'en',
+		translateToLanguageCode: 'es'
+	}
 	private state: LiveTranslateRealtimeClientState = 'disconnected'
+	private supersededDraftRequestIdSet = new Set<string>()
+	private toolArgumentsByResponseId = new Map<string, string>()
 
 	public constructor(callbacks: LiveTranslateRealtimeClientCallbacks) {
 		this.callbacks = callbacks
@@ -196,6 +235,10 @@ export class LiveTranslateRealtimeClient {
 		this.stop()
 		this.generation += 1
 		const generation = this.generation
+		this.settings = {
+			myLanguageCode: input.myLanguageCode,
+			translateToLanguageCode: input.translateToLanguageCode
+		}
 		this.setState('connecting')
 
 		try {
@@ -209,9 +252,7 @@ export class LiveTranslateRealtimeClient {
 
 			const peerConnection = new RTCPeerConnection()
 			this.peerConnection = peerConnection
-			peerConnection.addTransceiver('audio', {
-				direction: 'recvonly'
-			})
+			peerConnection.addTransceiver('audio', { direction: 'recvonly' })
 
 			const dataChannel = peerConnection.createDataChannel('oai-events')
 			this.dataChannel = dataChannel
@@ -227,10 +268,7 @@ export class LiveTranslateRealtimeClient {
 				if (generation !== this.generation) return
 				this.clearConnectTimeout()
 				this.setState('connected')
-				this.updateTranslateSettings({
-					myLanguageCode: input.myLanguageCode,
-					translateToLanguageCode: input.translateToLanguageCode
-				})
+				this.updateTranslateSettings(this.settings)
 			})
 
 			dataChannel.addEventListener('close', () => {
@@ -245,7 +283,6 @@ export class LiveTranslateRealtimeClient {
 
 			const offer = await peerConnection.createOffer()
 			await peerConnection.setLocalDescription(offer)
-
 			if (generation !== this.generation) return
 
 			const response = await fetch('https://api.openai.com/v1/realtime/calls', {
@@ -267,8 +304,8 @@ export class LiveTranslateRealtimeClient {
 			await peerConnection.setRemoteDescription({ sdp: answerSdp, type: 'answer' })
 		} catch (error) {
 			if (generation !== this.generation) return
-			const fallbackMessage = 'Unable to start Translate mode.'
 			this.setState('error')
+			const fallbackMessage = 'Unable to start Translate mode.'
 			if (error instanceof Error) this.callbacks.onError(error.message || fallbackMessage)
 			else this.callbacks.onError(fallbackMessage)
 			this.stop()
@@ -278,15 +315,18 @@ export class LiveTranslateRealtimeClient {
 	public stop(): void {
 		this.generation += 1
 		this.clearConnectTimeout()
-		this.activeRequestId = null
-		this.pendingInputQueue = []
-		this.completedToolArgumentsByResponseId.clear()
-		this.pendingResponseTimeoutByRequestId.forEach(timeoutId => {
+
+		this.pendingRequestTimeoutByRequestId.forEach(timeoutId => {
 			window.clearTimeout(timeoutId)
 		})
-		this.pendingResponseTimeoutByRequestId.clear()
+		this.pendingRequestTimeoutByRequestId.clear()
+		this.pendingRequestContextByRequestId.clear()
 		this.pendingRequestIdByResponseId.clear()
-		this.pendingResponseContextByRequestId.clear()
+		this.draftResponseTextByResponseId.clear()
+		this.toolArgumentsByResponseId.clear()
+		this.draftRequestIdsByItemId.clear()
+		this.supersededDraftRequestIdSet.clear()
+		this.latestDraftSequenceByItemId.clear()
 
 		try {
 			this.dataChannel?.close()
@@ -297,6 +337,7 @@ export class LiveTranslateRealtimeClient {
 			this.peerConnection?.close()
 		} catch {}
 		this.peerConnection = null
+
 		this.setState('disconnected')
 	}
 
@@ -304,19 +345,53 @@ export class LiveTranslateRealtimeClient {
 		return this.state === 'connected'
 	}
 
-	public submitInput(input: TranslateInputPayload): void {
+	public submitDraftInput(input: TranslateDraftInputPayload): void {
 		const normalizedText = input.text.trim()
-		if (!normalizedText) return
-		this.pendingInputQueue.push({
+		if (!normalizedText || !this.isConnected()) return
+		const previousSequence = this.latestDraftSequenceByItemId.get(input.itemId) ?? 0
+		const nextSequence = Math.max(previousSequence, input.draftSequence)
+		this.latestDraftSequenceByItemId.set(input.itemId, nextSequence)
+		const pendingDraftRequestIds = this.draftRequestIdsByItemId.get(input.itemId)
+		if (pendingDraftRequestIds) {
+			pendingDraftRequestIds.forEach(requestId => {
+				this.supersededDraftRequestIdSet.add(requestId)
+			})
+		}
+		this.requestDraftResponse({
+			draftSequence: nextSequence,
 			inputOrigin: input.inputOrigin,
 			itemId: input.itemId,
 			sourceText: normalizedText
 		})
-		this.drainResponseQueue()
+	}
+
+	public submitFinalInput(input: TranslateInputPayload): void {
+		const normalizedText = input.text.trim()
+		if (!normalizedText || !this.isConnected()) return
+		this.requestFinalResponse({
+			inputOrigin: input.inputOrigin,
+			itemId: input.itemId,
+			sourceText: normalizedText
+		})
+	}
+
+	public submitInput(input: TranslateInputPayload): void {
+		this.submitFinalInput(input)
 	}
 
 	public updateTranslateSettings(settings: LiveTranslateSettings): void {
+		this.settings = settings
 		this.sendSessionUpdate({
+			audio: {
+				input: {
+					turn_detection: {
+						create_response: false,
+						eagerness: 'high',
+						interrupt_response: false,
+						type: 'semantic_vad'
+					}
+				}
+			},
 			instructions: createTranslateInstructions(
 				settings.myLanguageCode,
 				settings.translateToLanguageCode
@@ -339,18 +414,16 @@ export class LiveTranslateRealtimeClient {
 	}
 
 	private createErrorPatch(
-		itemId: string,
-		inputOrigin: 'audio' | 'text',
-		sourceText: string,
+		context: PendingResponseContext,
 		translatedText: string,
 		responseId?: string
 	): LiveTranslateResultPatch {
 		return {
 			direction: 'my_to_target',
-			inputOrigin,
-			itemId,
+			inputOrigin: context.inputOrigin,
+			itemId: context.itemId,
 			sourceLanguageCode: 'und',
-			sourceText,
+			sourceText: context.sourceText,
 			status: 'error',
 			targetLanguageCode: 'und',
 			translatedText,
@@ -358,273 +431,51 @@ export class LiveTranslateRealtimeClient {
 		}
 	}
 
-	private emitAndReportErrorPatch(
-		itemId: string,
-		inputOrigin: 'audio' | 'text',
-		sourceText: string,
-		errorMessage: string,
-		responseId?: string
-	): void {
-		this.callbacks.onResultPatch(
-			this.createErrorPatch(itemId, inputOrigin, sourceText, errorMessage, responseId)
-		)
-		this.callbacks.onError(errorMessage)
-	}
-
 	private clearPendingRequestState(requestId: string): null | PendingResponseContext {
-		const pendingContext = this.pendingResponseContextByRequestId.get(requestId) ?? null
-		this.pendingResponseContextByRequestId.delete(requestId)
+		const context = this.pendingRequestContextByRequestId.get(requestId) ?? null
+		this.pendingRequestContextByRequestId.delete(requestId)
 		this.pendingRequestIdByResponseId.forEach((mappedRequestId, responseId) => {
 			if (mappedRequestId !== requestId) return
 			this.pendingRequestIdByResponseId.delete(responseId)
+			this.draftResponseTextByResponseId.delete(responseId)
+			this.toolArgumentsByResponseId.delete(responseId)
 		})
-		this.clearPendingRequestTimeout(requestId)
-		if (this.activeRequestId === requestId) {
-			this.activeRequestId = null
-		}
-		return pendingContext
-	}
-
-	private getStatusErrorMessage(
-		event: ReturnType<typeof ResponseDoneEventSchema.parse>,
-		defaultMessage: string
-	): string {
-		const statusDetails = event.response?.status_details
-		if (!statusDetails || typeof statusDetails !== 'object') return defaultMessage
-		const detailsRecord = statusDetails as Record<string, unknown>
-		const errorRecord =
-			typeof detailsRecord.error === 'object' && detailsRecord.error !== null
-				? (detailsRecord.error as Record<string, unknown>)
-				: null
-		return (
-			parseStringValue(errorRecord?.message) ??
-			parseStringValue(detailsRecord.reason) ??
-			parseStringValue(detailsRecord.message) ??
-			defaultMessage
-		)
-	}
-
-	private handleResponseDoneEvent(event: ReturnType<typeof ResponseDoneEventSchema.parse>): void {
-		const response = event.response
-		if (!response) return
-		const responseStatus = parseStringValue(response.status)?.toLowerCase() ?? null
-
-		const metadata =
-			response.metadata && typeof response.metadata === 'object'
-				? (response.metadata as Record<string, unknown>)
-				: {}
-		const responseId = parseStringValue(response.id) ?? parseStringValue(event.response_id)
-		const requestId =
-			parseStringValue(metadata.request_id) ??
-			(responseId ? this.pendingRequestIdByResponseId.get(responseId) : null) ??
-			this.activeRequestId
-		const sourceItemIdFromMetadata = parseStringValue(metadata.source_item_id)
-		const inputOriginFromMetadata = parseStringValue(metadata.input_origin)
-		if (responseId) this.pendingRequestIdByResponseId.delete(responseId)
-
-		const pendingContext = requestId ? this.clearPendingRequestState(requestId) : null
-		const sourceItemId = sourceItemIdFromMetadata ?? pendingContext?.itemId ?? null
-		const rawInputOrigin = inputOriginFromMetadata ?? pendingContext?.inputOrigin ?? null
-		const inputOrigin: 'audio' | 'text' = rawInputOrigin === 'text' ? 'text' : 'audio'
-		const sourceText = pendingContext?.sourceText ?? ''
-		if (!sourceItemId) {
-			if (this.activeRequestId === requestId) this.activeRequestId = null
-			this.drainResponseQueue()
-			return
-		}
-
-		if (responseStatus && responseStatus !== 'completed') {
-			const statusMessage = this.getStatusErrorMessage(
-				event,
-				`Translation failed with status ${responseStatus}.`
-			)
-			this.emitAndReportErrorPatch(
-				sourceItemId,
-				inputOrigin,
-				sourceText,
-				statusMessage,
-				responseId ?? undefined
-			)
-			this.drainResponseQueue()
-			return
-		}
-
-		const functionCall = (response.output ?? []).find(
-			item => item.type === 'function_call' && item.name === 'publish_translation'
-		)
-		const fallbackToolArguments = responseId
-			? (this.completedToolArgumentsByResponseId.get(responseId) ?? null)
-			: null
-		if (responseId) this.completedToolArgumentsByResponseId.delete(responseId)
-		const inferredToolArguments = tryExtractToolArgumentsFromResponseOutput(response.output)
-		const toolArguments =
-			(typeof functionCall?.arguments === 'string' ? functionCall.arguments : null) ??
-			fallbackToolArguments ??
-			inferredToolArguments
-
-		if (!toolArguments) {
-			const message = responseStatus
-				? `No valid publish_translation tool call was returned (${responseStatus}).`
-				: 'No valid publish_translation tool call was returned.'
-			this.emitAndReportErrorPatch(
-				sourceItemId,
-				inputOrigin,
-				sourceText,
-				message,
-				responseId ?? undefined
-			)
-			this.drainResponseQueue()
-			return
-		}
-
-		try {
-			const parsedArguments = JSON.parse(toolArguments) as unknown
-			const translatedResult = PublishTranslationToolArgumentsSchema.parse(parsedArguments)
-			this.callbacks.onResultPatch({
-				direction: translatedResult.direction,
-				inputOrigin,
-				itemId: sourceItemId,
-				sourceLanguageCode: translatedResult.sourceLanguageCode,
-				sourceText: translatedResult.sourceText,
-				status: 'final',
-				targetLanguageCode: translatedResult.targetLanguageCode,
-				translatedText: translatedResult.translatedText,
-				...(responseId ? { responseId } : {})
-			})
-		} catch {
-			this.emitAndReportErrorPatch(
-				sourceItemId,
-				inputOrigin,
-				sourceText,
-				'Tool arguments were malformed and could not be parsed.',
-				responseId ?? undefined
-			)
-		}
-
-		this.drainResponseQueue()
-	}
-
-	private handleResponseCreatedEvent(
-		event: ReturnType<typeof ResponseCreatedEventSchema.parse>
-	): void {
-		const responseId = parseStringValue(event.response?.id)
-		if (!responseId) return
-		const requestId = parseStringValue(event.response?.metadata?.request_id)
-		if (!requestId) return
-		this.pendingRequestIdByResponseId.set(responseId, requestId)
-	}
-
-	private maybeStorePublishTranslationToolArguments(
-		toolName: null | string,
-		toolArguments: null | string,
-		responseId: null | string
-	): void {
-		if (!responseId || toolName !== 'publish_translation' || !toolArguments) return
-		this.completedToolArgumentsByResponseId.set(responseId, toolArguments)
-	}
-
-	private handleResponseOutputItemDoneEvent(
-		event: ReturnType<typeof ResponseOutputItemDoneEventSchema.parse>
-	): void {
-		if (event.item.type !== 'function_call') return
-		this.maybeStorePublishTranslationToolArguments(
-			parseStringValue(event.item.name),
-			parseStringValue(event.item.arguments),
-			parseStringValue(event.response_id)
-		)
-	}
-
-	private handleResponseFunctionCallArgumentsDoneEvent(
-		event: ReturnType<typeof ResponseFunctionCallArgumentsDoneEventSchema.parse>
-	): void {
-		const toolName = parseStringValue(event.item?.name) ?? parseStringValue(event.name)
-		const toolArguments = parseStringValue(event.item?.arguments) ?? parseStringValue(event.arguments)
-		this.maybeStorePublishTranslationToolArguments(
-			toolName,
-			toolArguments,
-			parseStringValue(event.response_id)
-		)
-	}
-
-	private handleServerEvent(rawData: unknown): void {
-		try {
-			const candidate = typeof rawData === 'string' ? JSON.parse(rawData) : rawData
-			const baseEvent = RealtimeBaseServerEventSchema.parse(candidate)
-
-			switch (baseEvent.type) {
-				case 'response.created': {
-					const event = ResponseCreatedEventSchema.parse(candidate)
-					this.handleResponseCreatedEvent(event)
-					return
-				}
-				case 'response.output_item.done': {
-					const event = ResponseOutputItemDoneEventSchema.parse(candidate)
-					this.handleResponseOutputItemDoneEvent(event)
-					return
-				}
-				case 'response.function_call_arguments.done': {
-					const event = ResponseFunctionCallArgumentsDoneEventSchema.parse(candidate)
-					this.handleResponseFunctionCallArgumentsDoneEvent(event)
-					return
-				}
-				case 'response.done': {
-					const event = ResponseDoneEventSchema.parse(candidate)
-					this.handleResponseDoneEvent(event)
-					return
-				}
-				case 'error': {
-					const event = RealtimeErrorEventSchema.parse(candidate)
-					const message = event.error?.message || 'Realtime session error'
-					this.callbacks.onError(message)
-					this.failActiveRequest(message)
-					return
-				}
-				default:
-					return
+		const timeoutId = this.pendingRequestTimeoutByRequestId.get(requestId)
+		if (typeof timeoutId === 'number') window.clearTimeout(timeoutId)
+		this.pendingRequestTimeoutByRequestId.delete(requestId)
+		if (context?.requestKind === 'draft') {
+			const draftRequestIdSet = this.draftRequestIdsByItemId.get(context.itemId)
+			draftRequestIdSet?.delete(requestId)
+			if (!draftRequestIdSet || draftRequestIdSet.size === 0) {
+				this.draftRequestIdsByItemId.delete(context.itemId)
 			}
-		} catch {
-			return
+			this.supersededDraftRequestIdSet.delete(requestId)
 		}
+		return context
 	}
 
-	private clearPendingRequestTimeout(requestId: string): void {
-		const timeoutId = this.pendingResponseTimeoutByRequestId.get(requestId)
-		if (typeof timeoutId === 'number') {
-			window.clearTimeout(timeoutId)
-		}
-		this.pendingResponseTimeoutByRequestId.delete(requestId)
-	}
-
-	private failActiveRequest(errorMessage: string): void {
-		if (!this.activeRequestId) return
-		const pendingContext = this.clearPendingRequestState(this.activeRequestId)
-		if (pendingContext) {
-			this.emitAndReportErrorPatch(
-				pendingContext.itemId,
-				pendingContext.inputOrigin,
-				pendingContext.sourceText,
-				errorMessage
-			)
-		}
-		this.drainResponseQueue()
-	}
-
-	private requestTranslationResponse(pendingContext: PendingResponseContext): void {
+	private requestDraftResponse(
+		contextInput: Omit<PendingResponseContext, 'requestId' | 'requestKind'>
+	): void {
 		const requestId = crypto.randomUUID()
-		this.activeRequestId = requestId
-		this.pendingResponseContextByRequestId.set(requestId, pendingContext)
+		const context: PendingResponseContext = {
+			...contextInput,
+			requestId,
+			requestKind: 'draft'
+		}
+		const draftRequestIdSet = this.draftRequestIdsByItemId.get(context.itemId) ?? new Set<string>()
+		draftRequestIdSet.add(requestId)
+		this.draftRequestIdsByItemId.set(context.itemId, draftRequestIdSet)
+		this.pendingRequestContextByRequestId.set(requestId, context)
+
 		const timeoutId = window.setTimeout(() => {
 			const timedOutContext = this.clearPendingRequestState(requestId)
-			if (!timedOutContext) return
-			this.emitAndReportErrorPatch(
-				timedOutContext.itemId,
-				timedOutContext.inputOrigin,
-				timedOutContext.sourceText,
-				'Translation timed out before tool output was returned.'
-			)
-			this.drainResponseQueue()
-		}, translationResponseTimeoutMilliseconds)
-		this.pendingResponseTimeoutByRequestId.set(requestId, timeoutId)
+			if (!timedOutContext || timedOutContext.requestKind !== 'draft') return
+			if (this.isDraftResponseSuperseded(timedOutContext)) return
+			this.callbacks.onError('Draft translation timed out before output was returned.')
+		}, draftTranslationResponseTimeoutMilliseconds)
+		this.pendingRequestTimeoutByRequestId.set(requestId, timeoutId)
+
 		this.sendEvent({
 			response: {
 				conversation: 'none',
@@ -632,7 +483,7 @@ export class LiveTranslateRealtimeClient {
 					{
 						content: [
 							{
-								text: pendingContext.sourceText,
+								text: context.sourceText,
 								type: 'input_text'
 							}
 						],
@@ -640,10 +491,72 @@ export class LiveTranslateRealtimeClient {
 						type: 'message'
 					}
 				],
+				instructions: createDraftInstructions(
+					this.settings.myLanguageCode,
+					this.settings.translateToLanguageCode
+				),
 				metadata: {
-					input_origin: pendingContext.inputOrigin,
+					draft_sequence: context.draftSequence,
+					input_origin: context.inputOrigin,
 					request_id: requestId,
-					source_item_id: pendingContext.itemId
+					request_kind: context.requestKind,
+					source_item_id: context.itemId
+				},
+				output_modalities: ['text'],
+				tool_choice: 'none',
+				tools: []
+			},
+			type: 'response.create'
+		})
+	}
+
+	private requestFinalResponse(
+		contextInput: Omit<PendingResponseContext, 'requestId' | 'requestKind'>
+	): void {
+		const requestId = crypto.randomUUID()
+		const context: PendingResponseContext = {
+			...contextInput,
+			requestId,
+			requestKind: 'final'
+		}
+		this.pendingRequestContextByRequestId.set(requestId, context)
+
+		const timeoutId = window.setTimeout(() => {
+			const timedOutContext = this.clearPendingRequestState(requestId)
+			if (!timedOutContext || timedOutContext.requestKind !== 'final') return
+			const errorPatch = this.createErrorPatch(
+				timedOutContext,
+				'Translation timed out before tool output was returned.'
+			)
+			this.callbacks.onResultPatch(errorPatch)
+			this.callbacks.onError(errorPatch.translatedText)
+		}, finalTranslationResponseTimeoutMilliseconds)
+		this.pendingRequestTimeoutByRequestId.set(requestId, timeoutId)
+
+		this.sendEvent({
+			response: {
+				conversation: 'none',
+				input: [
+					{
+						content: [
+							{
+								text: context.sourceText,
+								type: 'input_text'
+							}
+						],
+						role: 'user',
+						type: 'message'
+					}
+				],
+				instructions: createTranslateInstructions(
+					this.settings.myLanguageCode,
+					this.settings.translateToLanguageCode
+				),
+				metadata: {
+					input_origin: context.inputOrigin,
+					request_id: requestId,
+					request_kind: context.requestKind,
+					source_item_id: context.itemId
 				},
 				output_modalities: ['text'],
 				tool_choice: buildToolChoice(),
@@ -653,12 +566,268 @@ export class LiveTranslateRealtimeClient {
 		})
 	}
 
-	private drainResponseQueue(): void {
-		if (this.activeRequestId) return
-		while (this.pendingInputQueue.length > 0) {
-			const pendingContext = this.pendingInputQueue.shift()
-			if (!pendingContext) continue
-			this.requestTranslationResponse(pendingContext)
+	private isDraftResponseSuperseded(context: PendingResponseContext): boolean {
+		if (context.requestKind !== 'draft') return false
+		if (this.supersededDraftRequestIdSet.has(context.requestId)) return true
+		const latestSequence = this.latestDraftSequenceByItemId.get(context.itemId)
+		if (typeof latestSequence !== 'number') return false
+		return (context.draftSequence ?? 0) < latestSequence
+	}
+
+	private emitDraftPatch(
+		context: PendingResponseContext,
+		translatedText: string,
+		responseId: null | string,
+		isDone: boolean
+	): void {
+		const safeText = translatedText.trim()
+		if (!safeText) return
+		const parsedPatch = TranslationDraftDeltaSchema.safeParse({
+			draftSequence: context.draftSequence ?? 0,
+			itemId: context.itemId,
+			responseId: responseId ?? undefined,
+			translatedText: safeText
+		})
+		if (!parsedPatch.success) return
+		const patch: LiveTranslateDraftPatch = {
+			draftSequence: parsedPatch.data.draftSequence,
+			inputOrigin: context.inputOrigin,
+			itemId: context.itemId,
+			translatedText: parsedPatch.data.translatedText,
+			...(parsedPatch.data.responseId ? { responseId: parsedPatch.data.responseId } : {})
+		}
+		if (isDone) this.callbacks.onDraftDonePatch(patch)
+		else this.callbacks.onDraftDeltaPatch(patch)
+	}
+
+	private handleResponseCreatedEvent(
+		event: ReturnType<typeof ResponseCreatedEventSchema.parse>
+	): void {
+		const responseId = parseStringValue(event.response?.id)
+		const requestId = parseStringValue(event.response?.metadata?.request_id)
+		if (!responseId || !requestId) return
+		this.pendingRequestIdByResponseId.set(responseId, requestId)
+	}
+
+	private handleResponseOutputTextDeltaEvent(
+		event: ReturnType<typeof ResponseOutputTextDeltaEventSchema.parse>
+	): void {
+		const responseId = parseStringValue(event.response_id)
+		if (!responseId || !event.delta) return
+		const requestId = this.pendingRequestIdByResponseId.get(responseId)
+		if (!requestId) return
+		const context = this.pendingRequestContextByRequestId.get(requestId)
+		if (!context || context.requestKind !== 'draft') return
+		if (this.isDraftResponseSuperseded(context)) return
+		const nextText = `${this.draftResponseTextByResponseId.get(responseId) ?? ''}${event.delta}`
+		this.draftResponseTextByResponseId.set(responseId, nextText)
+		this.emitDraftPatch(context, nextText, responseId, false)
+	}
+
+	private handleResponseOutputTextDoneEvent(
+		event: ReturnType<typeof ResponseOutputTextDoneEventSchema.parse>
+	): void {
+		const responseId = parseStringValue(event.response_id)
+		if (!responseId) return
+		const requestId = this.pendingRequestIdByResponseId.get(responseId)
+		if (!requestId) return
+		const context = this.pendingRequestContextByRequestId.get(requestId)
+		if (!context || context.requestKind !== 'draft') return
+		if (this.isDraftResponseSuperseded(context)) return
+		const nextText =
+			parseStringValue(event.text) ?? this.draftResponseTextByResponseId.get(responseId) ?? ''
+		this.draftResponseTextByResponseId.set(responseId, nextText)
+		this.emitDraftPatch(context, nextText, responseId, true)
+	}
+
+	private storeFunctionCallArgumentsByResponseId(
+		responseId: null | string,
+		argumentsDelta: null | string
+	): void {
+		if (!responseId || !argumentsDelta) return
+		const previousArguments = this.toolArgumentsByResponseId.get(responseId) ?? ''
+		this.toolArgumentsByResponseId.set(responseId, `${previousArguments}${argumentsDelta}`)
+	}
+
+	private handleResponseFunctionCallArgumentsDeltaEvent(
+		event: ReturnType<typeof ResponseFunctionCallArgumentsDeltaEventSchema.parse>
+	): void {
+		const responseId = parseStringValue(event.response_id)
+		const requestId = responseId ? this.pendingRequestIdByResponseId.get(responseId) : null
+		const context = requestId ? this.pendingRequestContextByRequestId.get(requestId) : null
+		if (!context || context.requestKind !== 'final') return
+		const toolName = parseStringValue(event.item?.name) ?? parseStringValue(event.name)
+		if (toolName !== 'publish_translation') return
+		const argumentsDelta = parseStringValue(event.delta) ?? parseStringValue(event.item?.arguments)
+		this.storeFunctionCallArgumentsByResponseId(responseId, argumentsDelta)
+	}
+
+	private handleResponseFunctionCallArgumentsDoneEvent(
+		event: ReturnType<typeof ResponseFunctionCallArgumentsDoneEventSchema.parse>
+	): void {
+		const responseId = parseStringValue(event.response_id)
+		const requestId = responseId ? this.pendingRequestIdByResponseId.get(responseId) : null
+		const context = requestId ? this.pendingRequestContextByRequestId.get(requestId) : null
+		if (!context || context.requestKind !== 'final') return
+		const toolName = parseStringValue(event.item?.name) ?? parseStringValue(event.name)
+		if (toolName !== 'publish_translation') return
+		const argumentsValue =
+			parseStringValue(event.item?.arguments) ?? parseStringValue(event.arguments) ?? null
+		if (!argumentsValue) return
+		this.toolArgumentsByResponseId.set(responseId ?? context.requestId, argumentsValue)
+	}
+
+	private handleResponseOutputItemDoneEvent(
+		event: ReturnType<typeof ResponseOutputItemDoneEventSchema.parse>
+	): void {
+		if (event.item.type !== 'function_call') return
+		if (parseStringValue(event.item.name) !== 'publish_translation') return
+		const responseId = parseStringValue(event.response_id)
+		const argumentsValue = parseStringValue(event.item.arguments)
+		if (!argumentsValue) return
+		this.toolArgumentsByResponseId.set(
+			responseId ?? event.item.id ?? crypto.randomUUID(),
+			argumentsValue
+		)
+	}
+
+	private handleResponseDoneEvent(event: ReturnType<typeof ResponseDoneEventSchema.parse>): void {
+		const responseId = parseStringValue(event.response?.id) ?? parseStringValue(event.response_id)
+		const metadata =
+			event.response?.metadata && typeof event.response.metadata === 'object'
+				? (event.response.metadata as Record<string, unknown>)
+				: {}
+		const requestId =
+			parseStringValue(metadata.request_id) ??
+			(responseId ? this.pendingRequestIdByResponseId.get(responseId) : null)
+		if (!requestId) return
+		const context = this.pendingRequestContextByRequestId.get(requestId)
+		const clearedContext = this.clearPendingRequestState(requestId)
+		if (!context || !clearedContext) return
+
+		const responseStatus = parseStringValue(event.response?.status)?.toLowerCase() ?? null
+		if (context.requestKind === 'draft') {
+			if (this.isDraftResponseSuperseded(context)) return
+			const draftText = responseId ? (this.draftResponseTextByResponseId.get(responseId) ?? '') : ''
+			this.emitDraftPatch(context, draftText, responseId, true)
+			if (responseStatus && !['completed', 'incomplete'].includes(responseStatus)) {
+				this.callbacks.onError(`Draft translation ended with status ${responseStatus}.`)
+			}
+			return
+		}
+
+		if (responseStatus && responseStatus !== 'completed') {
+			const statusDetails = event.response?.status_details
+			const reason =
+				parseStringValue((statusDetails as Record<string, unknown> | null)?.reason) ??
+				parseStringValue((statusDetails as Record<string, unknown> | null)?.message) ??
+				`Translation failed with status ${responseStatus}.`
+			const errorPatch = this.createErrorPatch(context, reason, responseId ?? undefined)
+			this.callbacks.onResultPatch(errorPatch)
+			this.callbacks.onError(reason)
+			return
+		}
+
+		const directFunctionCall = (event.response?.output ?? []).find(
+			item => item.type === 'function_call' && item.name === 'publish_translation'
+		)
+		const accumulatedArguments = responseId ? this.toolArgumentsByResponseId.get(responseId) : null
+		const inferredArguments = tryExtractToolArgumentsFromResponseOutput(event.response?.output)
+		const rawToolArguments =
+			(typeof directFunctionCall?.arguments === 'string' ? directFunctionCall.arguments : null) ??
+			accumulatedArguments ??
+			inferredArguments
+
+		if (!rawToolArguments) {
+			const errorPatch = this.createErrorPatch(
+				context,
+				'No valid publish_translation tool call was returned.',
+				responseId ?? undefined
+			)
+			this.callbacks.onResultPatch(errorPatch)
+			this.callbacks.onError(errorPatch.translatedText)
+			return
+		}
+
+		try {
+			const parsedArguments = JSON.parse(rawToolArguments) as unknown
+			const parsedResult = PublishTranslationToolArgumentsSchema.parse(parsedArguments)
+			this.callbacks.onResultPatch({
+				direction: parsedResult.direction,
+				inputOrigin: context.inputOrigin,
+				itemId: context.itemId,
+				sourceLanguageCode: parsedResult.sourceLanguageCode,
+				sourceText: parsedResult.sourceText,
+				status: 'final',
+				targetLanguageCode: parsedResult.targetLanguageCode,
+				translatedText: parsedResult.translatedText,
+				...(responseId ? { responseId } : {})
+			})
+		} catch {
+			const errorPatch = this.createErrorPatch(
+				context,
+				'Tool arguments were malformed and could not be parsed.',
+				responseId ?? undefined
+			)
+			this.callbacks.onResultPatch(errorPatch)
+			this.callbacks.onError(errorPatch.translatedText)
+		}
+	}
+
+	private handleRealtimeErrorEvent(event: ReturnType<typeof RealtimeErrorEventSchema.parse>): void {
+		const message = event.error?.message || 'Realtime session error'
+		this.callbacks.onError(message)
+	}
+
+	private handleServerEvent(rawData: unknown): void {
+		try {
+			const candidate = typeof rawData === 'string' ? JSON.parse(rawData) : rawData
+			const baseEvent = RealtimeBaseServerEventSchema.parse(candidate)
+			switch (baseEvent.type) {
+				case 'response.created': {
+					const event = ResponseCreatedEventSchema.parse(candidate)
+					this.handleResponseCreatedEvent(event)
+					return
+				}
+				case 'response.output_text.delta': {
+					const event = ResponseOutputTextDeltaEventSchema.parse(candidate)
+					this.handleResponseOutputTextDeltaEvent(event)
+					return
+				}
+				case 'response.output_text.done': {
+					const event = ResponseOutputTextDoneEventSchema.parse(candidate)
+					this.handleResponseOutputTextDoneEvent(event)
+					return
+				}
+				case 'response.function_call_arguments.delta': {
+					const event = ResponseFunctionCallArgumentsDeltaEventSchema.parse(candidate)
+					this.handleResponseFunctionCallArgumentsDeltaEvent(event)
+					return
+				}
+				case 'response.function_call_arguments.done': {
+					const event = ResponseFunctionCallArgumentsDoneEventSchema.parse(candidate)
+					this.handleResponseFunctionCallArgumentsDoneEvent(event)
+					return
+				}
+				case 'response.output_item.done': {
+					const event = ResponseOutputItemDoneEventSchema.parse(candidate)
+					this.handleResponseOutputItemDoneEvent(event)
+					return
+				}
+				case 'response.done': {
+					const event = ResponseDoneEventSchema.parse(candidate)
+					this.handleResponseDoneEvent(event)
+					return
+				}
+				case 'error': {
+					const event = RealtimeErrorEventSchema.parse(candidate)
+					this.handleRealtimeErrorEvent(event)
+					return
+				}
+				default:
+					return
+			}
+		} catch {
 			return
 		}
 	}

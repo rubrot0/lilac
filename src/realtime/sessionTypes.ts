@@ -45,7 +45,9 @@ export type ConnectionHealthState = {
 
 export type UtteranceDirection = 'my_to_target' | 'target_to_my'
 
-export type UtteranceStatus = 'streaming' | 'translating' | 'final' | 'error'
+export type UtteranceStatus = 'streaming' | 'translating' | 'draft' | 'final' | 'error'
+
+export type TranslateRenderState = 'listening' | 'draft' | 'final' | 'error'
 
 export type UtteranceCard = {
 	id: string
@@ -55,9 +57,14 @@ export type UtteranceCard = {
 	sourceText: string
 	sourceLanguageCode: string
 	translatedText: string
+	draftTranslatedText?: string
 	targetLanguageCode: string
 	direction: UtteranceDirection
+	renderState: TranslateRenderState
 	status: UtteranceStatus
+	draftSequence: number
+	utteranceSequence: number
+	lastDraftAt?: number
 	createdAt: number
 	errorMessage?: string
 }

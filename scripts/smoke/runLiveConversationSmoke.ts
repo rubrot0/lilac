@@ -19,6 +19,7 @@ type SmokeRunOptions = {
 
 type ScenarioResult = {
 	failures: string[]
+	metrics?: Record<string, number | string>
 	mode: SmokeMode
 }
 
@@ -36,6 +37,8 @@ const trackedProtocolErrorTextList = [
 	...missingToolCallErrorTextList
 ]
 const maxTranslateFinalizationLatencyMilliseconds = 30_000
+const translateCardSelector =
+	'[data-testid^="translate-card-"]:not([data-testid="translate-card-list"])'
 
 const mobileViewports = [
 	{ height: 812, width: 375 },
@@ -147,6 +150,16 @@ async function closeOverlayIfPresent(page: Page): Promise<void> {
 	}
 }
 
+async function ensureVoiceInputEnabled(page: Page): Promise<void> {
+	const voiceToggle = page.getByTestId('header-voice-input-toggle')
+	await voiceToggle.waitFor({ state: 'visible', timeout: 10_000 })
+	const ariaLabel = (await voiceToggle.getAttribute('aria-label')) ?? ''
+	if (ariaLabel.toLowerCase().includes('enable microphone')) {
+		await voiceToggle.click()
+		await page.waitForTimeout(500)
+	}
+}
+
 async function writeScenarioArtifacts(
 	page: Page,
 	artifactDirectoryPath: string,
@@ -248,10 +261,13 @@ async function runTranslateScenario(
 	artifactDirectoryPath: string
 ): Promise<ScenarioResult> {
 	const failures: string[] = []
+	const metrics: Record<string, number | string> = {}
 	let connectionFailureMessage: null | string = null
 	try {
 		await closeOverlayIfPresent(page)
+		await switchToModeWithRetry(page, 'chat')
 		await switchToModeWithRetry(page, 'translate')
+		await ensureVoiceInputEnabled(page)
 		try {
 			await waitForConnectionLive(page)
 		} catch (error) {
@@ -275,11 +291,40 @@ async function runTranslateScenario(
 			throw new Error('Translate mode rendered internal status chips in user-facing UI.')
 		}
 
+		const typedTranslateInput = `translate smoke ${Date.now()}`
+		await page.getByTestId('translate-text-input').fill(typedTranslateInput)
+		await page.getByTestId('translate-text-send').click()
+
 		const translateStartTime = Date.now()
 		await waitForCondition(
+			async function hasTranslateCardShell(): Promise<boolean> {
+				const cardCount = await page.locator(translateCardSelector).count()
+				return cardCount > 0
+			},
+			12_000,
+			'Translate mode did not create a subtitle card.'
+		)
+		metrics.firstCardLatencyMs = Date.now() - translateStartTime
+
+		await waitForCondition(
+			async function hasDraftRenderState(): Promise<boolean> {
+				const draftCardCount = await page
+					.locator(`${translateCardSelector}[data-render-state="draft"]`)
+					.count()
+				return draftCardCount > 0
+			},
+			12_000,
+			'Translate mode did not stream draft translation state before final output.'
+		)
+		metrics.firstDraftLatencyMs = Date.now() - translateStartTime
+
+		await waitForCondition(
 			async function hasTranslateCard(): Promise<boolean> {
-				const cardCount = await page.locator('[data-testid^="translate-card-"]').count()
+				const cardCount = await page.locator(translateCardSelector).count()
 				if (cardCount === 0) return false
+				const hasFinalCard =
+					(await page.locator(`${translateCardSelector}[data-render-state="final"]`).count()) > 0
+				if (!hasFinalCard) return false
 				const targetTextList = await page
 					.locator('[data-testid^="translate-card-target-"]')
 					.allInnerTexts()
@@ -288,6 +333,7 @@ async function runTranslateScenario(
 					if (!normalizedText) return false
 					if (normalizedText === 'Translating…') return false
 					if (normalizedText === 'Translating...') return false
+					if (normalizedText === 'Listening…') return false
 					return true
 				})
 			},
@@ -295,10 +341,19 @@ async function runTranslateScenario(
 			'Translate mode did not produce finalized translation output.'
 		)
 		const translateLatencyMilliseconds = Date.now() - translateStartTime
+		metrics.finalTranslationLatencyMs = translateLatencyMilliseconds
 		if (translateLatencyMilliseconds > maxTranslateFinalizationLatencyMilliseconds) {
 			throw new Error(
 				`Translate mode finalized too slowly (${translateLatencyMilliseconds}ms > ${maxTranslateFinalizationLatencyMilliseconds}ms).`
 			)
+		}
+		const draftLatencyMilliseconds =
+			typeof metrics.firstDraftLatencyMs === 'number' ? metrics.firstDraftLatencyMs : null
+		if (
+			typeof draftLatencyMilliseconds === 'number' &&
+			draftLatencyMilliseconds >= translateLatencyMilliseconds
+		) {
+			throw new Error('Translate mode did not emit draft output before final output.')
 		}
 
 		const subtitleRailText = await page.getByTestId('translate-live-subtitle-rail').innerText()
@@ -323,6 +378,7 @@ async function runTranslateScenario(
 
 	return {
 		failures,
+		metrics,
 		mode: 'translate'
 	}
 }

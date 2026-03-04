@@ -30,8 +30,11 @@ export type SubtitleDeltaPatch = {
 }
 
 export type SubtitleFinalPatch = {
+	committedAt: number
+	confidence?: number
 	itemId: string
 	previousItemId?: null | string
+	segmentSequence: number
 	text: string
 }
 
@@ -117,16 +120,53 @@ function buildTranscriptionPrompt(): string {
 	return 'Transcribe spoken audio faithfully. Preserve punctuation and proper nouns.'
 }
 
+function resolveAsrProfileFromEnvironment(): 'accurate' | 'fast' {
+	return process.env.NEXT_PUBLIC_LILAC_TRANSCRIBE_ASR_PROFILE === 'fast' ? 'fast' : 'accurate'
+}
+
+function resolveTurnEagernessFromEnvironment(): 'high' | 'low' | 'medium' {
+	const rawValue = process.env.NEXT_PUBLIC_LILAC_TRANSCRIBE_TURN_EAGERNESS
+	switch (rawValue) {
+		case 'low':
+			return 'low'
+		case 'medium':
+			return 'medium'
+		default:
+			return 'high'
+	}
+}
+
+function computeConfidenceFromLogprobs(
+	logprobList: Array<Record<string, unknown>> | undefined
+): number | undefined {
+	if (!Array.isArray(logprobList) || logprobList.length === 0) return undefined
+	let normalizedProbabilitySum = 0
+	let normalizedProbabilityCount = 0
+	for (const logprobEntry of logprobList) {
+		const logprobValue = typeof logprobEntry.logprob === 'number' ? logprobEntry.logprob : undefined
+		if (typeof logprobValue !== 'number' || !Number.isFinite(logprobValue)) continue
+		const clampedLogprob = Math.max(-20, Math.min(0, logprobValue))
+		const normalizedProbability = Math.exp(clampedLogprob)
+		normalizedProbabilitySum += normalizedProbability
+		normalizedProbabilityCount += 1
+	}
+	if (normalizedProbabilityCount === 0) return undefined
+	return Math.round((normalizedProbabilitySum / normalizedProbabilityCount) * 1000) / 1000
+}
+
 export class SubtitleTranscriptionClient {
 	private audioContext: AudioContext | null = null
 	private callbacks: SubtitleTranscriptionClientCallbacks
+	private committedAtByItemId = new Map<string, number>()
 	private generation = 0
 	private localAudioStream: MediaStream | null = null
 	private micProcessorNode: ScriptProcessorNode | null = null
 	private micSourceNode: MediaStreamAudioSourceNode | null = null
 	private previousItemIdByItemId = new Map<string, null | string>()
+	private segmentSequence = 0
 	private silentGainNode: GainNode | null = null
 	private state: SubtitleTranscriptionClientState = 'disconnected'
+	private turnEagerness: 'high' | 'low' | 'medium' = resolveTurnEagernessFromEnvironment()
 	private voiceInputEnabled = true
 	private websocket: WebSocket | null = null
 
@@ -143,8 +183,10 @@ export class SubtitleTranscriptionClient {
 
 		try {
 			const clientSecret = await createRealtimeTranscriptionSessionAction({
+				asrProfile: resolveAsrProfileFromEnvironment(),
 				myLanguageCode: input.myLanguageCode,
-				translateToLanguageCode: input.translateToLanguageCode
+				translateToLanguageCode: input.translateToLanguageCode,
+				turnEagerness: this.turnEagerness
 			})
 			if (generation !== this.generation) return
 
@@ -160,13 +202,14 @@ export class SubtitleTranscriptionClient {
 				this.setState('connected')
 				this.sendEvent({
 					session: {
+						include: ['item.input_audio_transcription.logprobs'],
 						input_audio_format: 'pcm16',
 						input_audio_transcription: {
 							model: defaultInputTranscriptionModel,
 							prompt: buildTranscriptionPrompt()
 						},
 						turn_detection: {
-							eagerness: 'high',
+							eagerness: this.turnEagerness,
 							type: 'semantic_vad'
 						},
 						type: 'transcription'
@@ -206,7 +249,9 @@ export class SubtitleTranscriptionClient {
 	public stop(): void {
 		this.generation += 1
 		this.stopVoiceInput()
+		this.committedAtByItemId.clear()
 		this.previousItemIdByItemId.clear()
+		this.segmentSequence = 0
 
 		try {
 			this.websocket?.close()
@@ -238,9 +283,14 @@ export class SubtitleTranscriptionClient {
 		void settings
 		this.sendEvent({
 			session: {
+				include: ['item.input_audio_transcription.logprobs'],
 				input_audio_transcription: {
 					model: defaultInputTranscriptionModel,
 					prompt: buildTranscriptionPrompt()
+				},
+				turn_detection: {
+					eagerness: this.turnEagerness,
+					type: 'semantic_vad'
 				},
 				type: 'transcription'
 			},
@@ -321,6 +371,7 @@ export class SubtitleTranscriptionClient {
 	private handleInputAudioBufferCommittedEvent(candidate: unknown): void {
 		const event = InputAudioBufferCommittedEventSchema.parse(candidate)
 		this.previousItemIdByItemId.set(event.item_id, event.previous_item_id ?? null)
+		this.committedAtByItemId.set(event.item_id, Date.now())
 	}
 
 	private handleInputAudioTranscriptionDeltaEvent(candidate: unknown): void {
@@ -337,10 +388,15 @@ export class SubtitleTranscriptionClient {
 		const event = InputAudioTranscriptionCompletedEventSchema.parse(candidate)
 		const transcript = event.transcript.trim()
 		if (!transcript) return
+		this.segmentSequence += 1
+		const confidence = computeConfidenceFromLogprobs(event.logprobs)
 		this.callbacks.onSubtitleFinal({
+			committedAt: this.committedAtByItemId.get(event.item_id) ?? Date.now(),
 			itemId: event.item_id,
 			previousItemId: this.previousItemIdByItemId.get(event.item_id) ?? null,
-			text: transcript
+			segmentSequence: this.segmentSequence,
+			text: transcript,
+			...(typeof confidence === 'number' ? { confidence } : {})
 		})
 	}
 
