@@ -3,9 +3,7 @@ import { isValidLanguageCode, normalizeLanguageCode } from '@/realtime/languageC
 import {
 	ChatRealtimeModelSchema,
 	defaultChatRealtimeModel,
-	defaultTranscriptionModel,
-	defaultTranslationModel,
-	TranslationModelSchema
+	defaultTranscriptionModel
 } from '@/realtime/modelConfig'
 
 export const LanguageCodeSchema = z
@@ -68,30 +66,6 @@ export const CreateRealtimeTranscriptionSessionActionOutputSchema = z.object({
 	expiresAt: z.number(),
 	value: z.string().min(1)
 })
-
-export const TranslateFallbackActionInputSchema = z.object({
-	model: TranslationModelSchema.default(defaultTranslationModel),
-	myLanguageCode: LanguageCodeSchema,
-	sourceText: z.string().min(1).max(4000),
-	translateToLanguageCode: LanguageCodeSchema
-})
-
-export const TranslateFallbackActionOutputSchema = z.discriminatedUnion('ok', [
-	z.object({
-		error: z.string().min(1),
-		ok: z.literal(false)
-	}),
-	z.object({
-		ok: z.literal(true),
-		result: z.object({
-			direction: z.enum(['my_to_target', 'target_to_my']),
-			sourceLanguageCode: LanguageCodeSchema,
-			sourceText: z.string().min(1),
-			targetLanguageCode: LanguageCodeSchema,
-			translatedText: z.string().min(1)
-		})
-	})
-])
 
 export const PublishTranslationToolArgumentsSchema = z.object({
 	direction: z.enum(['my_to_target', 'target_to_my']),
@@ -253,7 +227,7 @@ export const ResponseCreatedEventSchema = z
 		response: z
 			.object({
 				id: z.string().optional(),
-				metadata: z.record(z.string(), z.unknown()).optional()
+				metadata: z.record(z.string(), z.unknown()).nullable().optional()
 			})
 			.passthrough()
 			.optional(),
@@ -293,9 +267,10 @@ export const ResponseDoneEventSchema = z
 		response: z
 			.object({
 				id: z.string().optional(),
-				metadata: z.record(z.string(), z.unknown()).optional(),
+				metadata: z.record(z.string(), z.unknown()).nullable().optional(),
 				output: z.array(ResponseDoneFunctionCallItemSchema).optional(),
-				status: z.string().optional()
+				status: z.string().optional(),
+				status_details: z.record(z.string(), z.unknown()).nullable().optional()
 			})
 			.passthrough()
 			.optional(),

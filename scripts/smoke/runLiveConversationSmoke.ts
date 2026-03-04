@@ -35,6 +35,7 @@ const trackedProtocolErrorTextList = [
 	invalidItemIdErrorText,
 	...missingToolCallErrorTextList
 ]
+const maxTranslateFinalizationLatencyMilliseconds = 30_000
 
 const mobileViewports = [
 	{ height: 812, width: 375 },
@@ -274,6 +275,7 @@ async function runTranslateScenario(
 			throw new Error('Translate mode rendered internal status chips in user-facing UI.')
 		}
 
+		const translateStartTime = Date.now()
 		await waitForCondition(
 			async function hasTranslateCard(): Promise<boolean> {
 				const cardCount = await page.locator('[data-testid^="translate-card-"]').count()
@@ -289,9 +291,15 @@ async function runTranslateScenario(
 					return true
 				})
 			},
-			45_000,
+			20_000,
 			'Translate mode did not produce finalized translation output.'
 		)
+		const translateLatencyMilliseconds = Date.now() - translateStartTime
+		if (translateLatencyMilliseconds > maxTranslateFinalizationLatencyMilliseconds) {
+			throw new Error(
+				`Translate mode finalized too slowly (${translateLatencyMilliseconds}ms > ${maxTranslateFinalizationLatencyMilliseconds}ms).`
+			)
+		}
 
 		const subtitleRailText = await page.getByTestId('translate-live-subtitle-rail').innerText()
 		if (!subtitleRailText.trim()) {

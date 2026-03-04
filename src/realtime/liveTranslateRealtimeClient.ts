@@ -50,12 +50,11 @@ export type LiveTranslateRealtimeClientCallbacks = {
 type PendingResponseContext = {
 	inputOrigin: 'audio' | 'text'
 	itemId: string
-	retryCount: number
 	sourceText: string
 }
 
-const translationResponseTimeoutMilliseconds = 16_000
-const maxMissingToolCallRetryCount = 1
+const translationResponseTimeoutMilliseconds = 8_000
+const channelConnectTimeoutMilliseconds = 7_000
 
 function createTranslateInstructions(
 	myLanguageCode: string,
@@ -176,16 +175,17 @@ function tryExtractToolArgumentsFromResponseOutput(
 }
 
 export class LiveTranslateRealtimeClient {
+	private activeRequestId: null | string = null
 	private callbacks: LiveTranslateRealtimeClientCallbacks
+	private connectTimeoutId: null | number = null
 	private completedToolArgumentsByResponseId = new Map<string, string>()
 	private dataChannel: null | RTCDataChannel = null
 	private generation = 0
-	private pendingRequestIdQueue: string[] = []
+	private pendingInputQueue: PendingResponseContext[] = []
 	private pendingRequestIdByResponseId = new Map<string, string>()
 	private pendingResponseContextByRequestId = new Map<string, PendingResponseContext>()
 	private pendingResponseTimeoutByRequestId = new Map<string, number>()
 	private peerConnection: null | RTCPeerConnection = null
-	private sourceItemOrder: string[] = []
 	private state: LiveTranslateRealtimeClientState = 'disconnected'
 
 	public constructor(callbacks: LiveTranslateRealtimeClientCallbacks) {
@@ -209,12 +209,23 @@ export class LiveTranslateRealtimeClient {
 
 			const peerConnection = new RTCPeerConnection()
 			this.peerConnection = peerConnection
+			peerConnection.addTransceiver('audio', {
+				direction: 'recvonly'
+			})
 
 			const dataChannel = peerConnection.createDataChannel('oai-events')
 			this.dataChannel = dataChannel
+			this.connectTimeoutId = window.setTimeout(() => {
+				if (generation !== this.generation) return
+				if (this.state === 'connected') return
+				this.callbacks.onError('Translate data channel did not open in time.')
+				this.setState('error')
+				this.stop()
+			}, channelConnectTimeoutMilliseconds)
 
 			dataChannel.addEventListener('open', () => {
 				if (generation !== this.generation) return
+				this.clearConnectTimeout()
 				this.setState('connected')
 				this.updateTranslateSettings({
 					myLanguageCode: input.myLanguageCode,
@@ -224,6 +235,7 @@ export class LiveTranslateRealtimeClient {
 
 			dataChannel.addEventListener('close', () => {
 				if (generation !== this.generation) return
+				this.clearConnectTimeout()
 				this.setState('disconnected')
 			})
 
@@ -265,15 +277,16 @@ export class LiveTranslateRealtimeClient {
 
 	public stop(): void {
 		this.generation += 1
+		this.clearConnectTimeout()
+		this.activeRequestId = null
+		this.pendingInputQueue = []
 		this.completedToolArgumentsByResponseId.clear()
 		this.pendingResponseTimeoutByRequestId.forEach(timeoutId => {
 			window.clearTimeout(timeoutId)
 		})
 		this.pendingResponseTimeoutByRequestId.clear()
-		this.pendingRequestIdQueue = []
 		this.pendingRequestIdByResponseId.clear()
 		this.pendingResponseContextByRequestId.clear()
-		this.sourceItemOrder = []
 
 		try {
 			this.dataChannel?.close()
@@ -294,22 +307,12 @@ export class LiveTranslateRealtimeClient {
 	public submitInput(input: TranslateInputPayload): void {
 		const normalizedText = input.text.trim()
 		if (!normalizedText) return
-		this.registerSourceItem(input.itemId)
-		this.sendEvent({
-			item: {
-				content: [
-					{
-						text: normalizedText,
-						type: 'input_text'
-					}
-				],
-				id: input.itemId,
-				role: 'user',
-				type: 'message'
-			},
-			type: 'conversation.item.create'
+		this.pendingInputQueue.push({
+			inputOrigin: input.inputOrigin,
+			itemId: input.itemId,
+			sourceText: normalizedText
 		})
-		this.requestTranslationResponse(input.itemId, input.inputOrigin, normalizedText)
+		this.drainResponseQueue()
 	}
 
 	public updateTranslateSettings(settings: LiveTranslateSettings): void {
@@ -324,18 +327,81 @@ export class LiveTranslateRealtimeClient {
 		})
 	}
 
-	private buildResponseInput(itemId: string): Array<Record<string, string>> {
-		const recentItemIdList = this.sourceItemOrder.slice(Math.max(0, this.sourceItemOrder.length - 12))
-		if (!recentItemIdList.includes(itemId)) recentItemIdList.push(itemId)
-		return recentItemIdList.map(sourceItemId => ({
-			id: sourceItemId,
-			type: 'item_reference'
-		}))
-	}
-
 	private setState(state: LiveTranslateRealtimeClientState): void {
 		this.state = state
 		this.callbacks.onConnectionStateChange(state)
+	}
+
+	private clearConnectTimeout(): void {
+		if (typeof this.connectTimeoutId !== 'number') return
+		window.clearTimeout(this.connectTimeoutId)
+		this.connectTimeoutId = null
+	}
+
+	private createErrorPatch(
+		itemId: string,
+		inputOrigin: 'audio' | 'text',
+		sourceText: string,
+		translatedText: string,
+		responseId?: string
+	): LiveTranslateResultPatch {
+		return {
+			direction: 'my_to_target',
+			inputOrigin,
+			itemId,
+			sourceLanguageCode: 'und',
+			sourceText,
+			status: 'error',
+			targetLanguageCode: 'und',
+			translatedText,
+			...(responseId ? { responseId } : {})
+		}
+	}
+
+	private emitAndReportErrorPatch(
+		itemId: string,
+		inputOrigin: 'audio' | 'text',
+		sourceText: string,
+		errorMessage: string,
+		responseId?: string
+	): void {
+		this.callbacks.onResultPatch(
+			this.createErrorPatch(itemId, inputOrigin, sourceText, errorMessage, responseId)
+		)
+		this.callbacks.onError(errorMessage)
+	}
+
+	private clearPendingRequestState(requestId: string): null | PendingResponseContext {
+		const pendingContext = this.pendingResponseContextByRequestId.get(requestId) ?? null
+		this.pendingResponseContextByRequestId.delete(requestId)
+		this.pendingRequestIdByResponseId.forEach((mappedRequestId, responseId) => {
+			if (mappedRequestId !== requestId) return
+			this.pendingRequestIdByResponseId.delete(responseId)
+		})
+		this.clearPendingRequestTimeout(requestId)
+		if (this.activeRequestId === requestId) {
+			this.activeRequestId = null
+		}
+		return pendingContext
+	}
+
+	private getStatusErrorMessage(
+		event: ReturnType<typeof ResponseDoneEventSchema.parse>,
+		defaultMessage: string
+	): string {
+		const statusDetails = event.response?.status_details
+		if (!statusDetails || typeof statusDetails !== 'object') return defaultMessage
+		const detailsRecord = statusDetails as Record<string, unknown>
+		const errorRecord =
+			typeof detailsRecord.error === 'object' && detailsRecord.error !== null
+				? (detailsRecord.error as Record<string, unknown>)
+				: null
+		return (
+			parseStringValue(errorRecord?.message) ??
+			parseStringValue(detailsRecord.reason) ??
+			parseStringValue(detailsRecord.message) ??
+			defaultMessage
+		)
 	}
 
 	private handleResponseDoneEvent(event: ReturnType<typeof ResponseDoneEventSchema.parse>): void {
@@ -343,20 +409,45 @@ export class LiveTranslateRealtimeClient {
 		if (!response) return
 		const responseStatus = parseStringValue(response.status)?.toLowerCase() ?? null
 
-		const metadata = response.metadata ?? {}
+		const metadata =
+			response.metadata && typeof response.metadata === 'object'
+				? (response.metadata as Record<string, unknown>)
+				: {}
 		const responseId = parseStringValue(response.id) ?? parseStringValue(event.response_id)
 		const requestId =
 			parseStringValue(metadata.request_id) ??
-			(responseId ? (this.pendingRequestIdByResponseId.get(responseId) ?? null) : null)
+			(responseId ? this.pendingRequestIdByResponseId.get(responseId) : null) ??
+			this.activeRequestId
 		const sourceItemIdFromMetadata = parseStringValue(metadata.source_item_id)
 		const inputOriginFromMetadata = parseStringValue(metadata.input_origin)
 		if (responseId) this.pendingRequestIdByResponseId.delete(responseId)
 
-		const pendingContext = this.resolvePendingContext(requestId)
+		const pendingContext = requestId ? this.clearPendingRequestState(requestId) : null
 		const sourceItemId = sourceItemIdFromMetadata ?? pendingContext?.itemId ?? null
 		const rawInputOrigin = inputOriginFromMetadata ?? pendingContext?.inputOrigin ?? null
 		const inputOrigin: 'audio' | 'text' = rawInputOrigin === 'text' ? 'text' : 'audio'
-		if (!sourceItemId) return
+		const sourceText = pendingContext?.sourceText ?? ''
+		if (!sourceItemId) {
+			if (this.activeRequestId === requestId) this.activeRequestId = null
+			this.drainResponseQueue()
+			return
+		}
+
+		if (responseStatus && responseStatus !== 'completed') {
+			const statusMessage = this.getStatusErrorMessage(
+				event,
+				`Translation failed with status ${responseStatus}.`
+			)
+			this.emitAndReportErrorPatch(
+				sourceItemId,
+				inputOrigin,
+				sourceText,
+				statusMessage,
+				responseId ?? undefined
+			)
+			this.drainResponseQueue()
+			return
+		}
 
 		const functionCall = (response.output ?? []).find(
 			item => item.type === 'function_call' && item.name === 'publish_translation'
@@ -372,28 +463,17 @@ export class LiveTranslateRealtimeClient {
 			inferredToolArguments
 
 		if (!toolArguments) {
-			if (pendingContext && pendingContext.retryCount < maxMissingToolCallRetryCount) {
-				this.requestTranslationResponse(
-					pendingContext.itemId,
-					pendingContext.inputOrigin,
-					pendingContext.sourceText,
-					pendingContext.retryCount + 1
-				)
-				return
-			}
-			this.callbacks.onResultPatch({
-				direction: 'my_to_target',
+			const message = responseStatus
+				? `No valid publish_translation tool call was returned (${responseStatus}).`
+				: 'No valid publish_translation tool call was returned.'
+			this.emitAndReportErrorPatch(
+				sourceItemId,
 				inputOrigin,
-				itemId: sourceItemId,
-				sourceLanguageCode: 'und',
-				sourceText: pendingContext?.sourceText ?? '',
-				status: 'error',
-				targetLanguageCode: 'und',
-				translatedText: responseStatus
-					? `No valid publish_translation tool call was returned (${responseStatus}).`
-					: 'No valid publish_translation tool call was returned.',
-				...(responseId ? { responseId } : {})
-			})
+				sourceText,
+				message,
+				responseId ?? undefined
+			)
+			this.drainResponseQueue()
 			return
 		}
 
@@ -412,18 +492,16 @@ export class LiveTranslateRealtimeClient {
 				...(responseId ? { responseId } : {})
 			})
 		} catch {
-			this.callbacks.onResultPatch({
-				direction: 'my_to_target',
+			this.emitAndReportErrorPatch(
+				sourceItemId,
 				inputOrigin,
-				itemId: sourceItemId,
-				sourceLanguageCode: 'und',
-				sourceText: pendingContext?.sourceText ?? '',
-				status: 'error',
-				targetLanguageCode: 'und',
-				translatedText: 'Tool arguments were malformed and could not be parsed.',
-				...(responseId ? { responseId } : {})
-			})
+				sourceText,
+				'Tool arguments were malformed and could not be parsed.',
+				responseId ?? undefined
+			)
 		}
+
+		this.drainResponseQueue()
 	}
 
 	private handleResponseCreatedEvent(
@@ -496,7 +574,9 @@ export class LiveTranslateRealtimeClient {
 				}
 				case 'error': {
 					const event = RealtimeErrorEventSchema.parse(candidate)
-					this.callbacks.onError(event.error?.message || 'Realtime session error')
+					const message = event.error?.message || 'Realtime session error'
+					this.callbacks.onError(message)
+					this.failActiveRequest(message)
 					return
 				}
 				default:
@@ -504,14 +584,6 @@ export class LiveTranslateRealtimeClient {
 			}
 		} catch {
 			return
-		}
-	}
-
-	private registerSourceItem(itemId: string): void {
-		if (this.sourceItemOrder.includes(itemId)) return
-		this.sourceItemOrder.push(itemId)
-		if (this.sourceItemOrder.length > 64) {
-			this.sourceItemOrder = this.sourceItemOrder.slice(this.sourceItemOrder.length - 64)
 		}
 	}
 
@@ -523,83 +595,55 @@ export class LiveTranslateRealtimeClient {
 		this.pendingResponseTimeoutByRequestId.delete(requestId)
 	}
 
-	private removePendingRequestIdFromQueue(requestId: string): void {
-		const requestIndex = this.pendingRequestIdQueue.indexOf(requestId)
-		if (requestIndex === -1) return
-		this.pendingRequestIdQueue.splice(requestIndex, 1)
-	}
-
-	private resolvePendingContext(requestId: null | string): null | PendingResponseContext {
-		if (requestId) {
-			const directContext = this.pendingResponseContextByRequestId.get(requestId) ?? null
-			this.pendingResponseContextByRequestId.delete(requestId)
-			this.clearPendingRequestTimeout(requestId)
-			this.removePendingRequestIdFromQueue(requestId)
-			if (directContext) return directContext
+	private failActiveRequest(errorMessage: string): void {
+		if (!this.activeRequestId) return
+		const pendingContext = this.clearPendingRequestState(this.activeRequestId)
+		if (pendingContext) {
+			this.emitAndReportErrorPatch(
+				pendingContext.itemId,
+				pendingContext.inputOrigin,
+				pendingContext.sourceText,
+				errorMessage
+			)
 		}
-
-		const fallbackRequestId = this.pendingRequestIdQueue.shift()
-		if (!fallbackRequestId) return null
-		const fallbackContext = this.pendingResponseContextByRequestId.get(fallbackRequestId) ?? null
-		this.pendingResponseContextByRequestId.delete(fallbackRequestId)
-		this.clearPendingRequestTimeout(fallbackRequestId)
-		return fallbackContext
+		this.drainResponseQueue()
 	}
 
-	private requestTranslationResponse(
-		itemId: string,
-		inputOrigin: 'audio' | 'text',
-		sourceText: string,
-		retryCount = 0
-	): void {
+	private requestTranslationResponse(pendingContext: PendingResponseContext): void {
 		const requestId = crypto.randomUUID()
-		this.pendingResponseContextByRequestId.set(requestId, {
-			inputOrigin,
-			itemId,
-			retryCount,
-			sourceText
-		})
-		this.pendingRequestIdQueue.push(requestId)
+		this.activeRequestId = requestId
+		this.pendingResponseContextByRequestId.set(requestId, pendingContext)
 		const timeoutId = window.setTimeout(() => {
-			const pendingContext = this.pendingResponseContextByRequestId.get(requestId)
-			if (!pendingContext) return
-			this.pendingResponseContextByRequestId.delete(requestId)
-			this.removePendingRequestIdFromQueue(requestId)
-			this.clearPendingRequestTimeout(requestId)
-
-			if (pendingContext.retryCount < maxMissingToolCallRetryCount) {
-				this.requestTranslationResponse(
-					pendingContext.itemId,
-					pendingContext.inputOrigin,
-					pendingContext.sourceText,
-					pendingContext.retryCount + 1
-				)
-				return
-			}
-
-			this.callbacks.onResultPatch({
-				direction: 'my_to_target',
-				inputOrigin: pendingContext.inputOrigin,
-				itemId: pendingContext.itemId,
-				sourceLanguageCode: 'und',
-				sourceText: pendingContext.sourceText,
-				status: 'error',
-				targetLanguageCode: 'und',
-				translatedText: 'Translation timed out before tool output was returned.'
-			})
+			const timedOutContext = this.clearPendingRequestState(requestId)
+			if (!timedOutContext) return
+			this.emitAndReportErrorPatch(
+				timedOutContext.itemId,
+				timedOutContext.inputOrigin,
+				timedOutContext.sourceText,
+				'Translation timed out before tool output was returned.'
+			)
+			this.drainResponseQueue()
 		}, translationResponseTimeoutMilliseconds)
 		this.pendingResponseTimeoutByRequestId.set(requestId, timeoutId)
 		this.sendEvent({
 			response: {
 				conversation: 'none',
-				input: this.buildResponseInput(itemId),
-				instructions:
-					'Translate the referenced user item and call publish_translation exactly once. Do not return plain assistant text.',
+				input: [
+					{
+						content: [
+							{
+								text: pendingContext.sourceText,
+								type: 'input_text'
+							}
+						],
+						role: 'user',
+						type: 'message'
+					}
+				],
 				metadata: {
-					input_origin: inputOrigin,
+					input_origin: pendingContext.inputOrigin,
 					request_id: requestId,
-					retry_count: retryCount,
-					source_item_id: itemId
+					source_item_id: pendingContext.itemId
 				},
 				output_modalities: ['text'],
 				tool_choice: buildToolChoice(),
@@ -607,6 +651,16 @@ export class LiveTranslateRealtimeClient {
 			},
 			type: 'response.create'
 		})
+	}
+
+	private drainResponseQueue(): void {
+		if (this.activeRequestId) return
+		while (this.pendingInputQueue.length > 0) {
+			const pendingContext = this.pendingInputQueue.shift()
+			if (!pendingContext) continue
+			this.requestTranslationResponse(pendingContext)
+			return
+		}
 	}
 
 	private sendSessionUpdate(sessionPatch: Record<string, unknown>): void {

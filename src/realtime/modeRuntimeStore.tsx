@@ -11,7 +11,6 @@ import {
 	useState
 } from 'react'
 
-import { translateFallbackAction } from '@/app/actions/realtime'
 import { ChatRealtimeClient, type ChatTranscriptPatch } from '@/realtime/chatRealtimeClient'
 import { normalizeLanguageCode, resolveLanguageCode } from '@/realtime/languageCatalog'
 import {
@@ -95,10 +94,9 @@ type PendingTranslateInput = TranslateInputPayload & {
 	previousItemId?: null | string
 }
 
-const subtitleAggregationSilenceMilliseconds = 1200
+const subtitleAggregationSilenceMilliseconds = 600
 const reconnectStatusGraceMilliseconds = 1500
 const subtitleDedupRoundedTimeWindowMilliseconds = 700
-const translateFallbackTimeoutMilliseconds = 18_000
 const systemLeakMatcherList = SystemLeakTextSchema.parse(undefined).map(matcher =>
 	matcher.toLowerCase()
 )
@@ -413,13 +411,10 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	const pendingTranslateInputQueueRef = useRef<PendingTranslateInput[]>([])
 	const chatTranscriptSequenceRef = useRef(1)
 	const subtitleDedupKeyTimestampByKeyRef = useRef<Map<string, number>>(new Map())
-	const translateCardListRef = useRef<UtteranceCard[]>([])
 	const translateSegmentAggregationStateRef = useRef<TranslateSegmentAggregationState>(
 		defaultTranslateSegmentAggregationState
 	)
 	const translateAggregationFlushTimerRef = useRef<null | number>(null)
-	const translateFallbackTimeoutByCardIdRef = useRef<Map<string, number>>(new Map())
-	const translateFallbackInFlightCardIdSetRef = useRef<Set<string>>(new Set())
 	const reconnectTimerByChannelRef = useRef<Partial<Record<RuntimeChannel, number>>>({})
 	const reconnectStatusTimerRef = useRef<null | number>(null)
 	const scheduleReconnectRef = useRef<(channel: RuntimeChannel) => void>(() => {})
@@ -447,14 +442,6 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		translateAggregationFlushTimerRef.current = null
 	}, [])
 
-	const clearAllTranslateFallbackTimeouts = useCallback(() => {
-		translateFallbackTimeoutByCardIdRef.current.forEach(timeoutId => {
-			window.clearTimeout(timeoutId)
-		})
-		translateFallbackTimeoutByCardIdRef.current.clear()
-		translateFallbackInFlightCardIdSetRef.current.clear()
-	}, [])
-
 	const stopChatClient = useCallback(() => {
 		intentionalStopByChannelRef.current.chat = true
 		chatClientRef.current?.stop()
@@ -480,7 +467,6 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		void subtitleClientRef.current?.stop()
 		subtitleClientRef.current = null
 		clearTranslateAggregationFlushTimer()
-		clearAllTranslateFallbackTimeouts()
 		translateSegmentAggregationStateRef.current = defaultTranslateSegmentAggregationState
 		setSubtitleChannelState('disconnected')
 		setLiveSubtitleState(previousState => ({
@@ -493,7 +479,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		queueMicrotask(() => {
 			intentionalStopByChannelRef.current.subtitle = false
 		})
-	}, [clearAllTranslateFallbackTimeouts, clearTranslateAggregationFlushTimer])
+	}, [clearTranslateAggregationFlushTimer])
 
 	const stopAllClients = useCallback(() => {
 		stopChatClient()
@@ -510,9 +496,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		subtitleDedupKeyTimestampByKeyRef.current.clear()
 		chatTranscriptSequenceRef.current = 1
 		clearTranslateAggregationFlushTimer()
-		clearAllTranslateFallbackTimeouts()
 		pendingTranslateInputQueueRef.current = []
-	}, [clearAllTranslateFallbackTimeouts, clearTranslateAggregationFlushTimer])
+	}, [clearTranslateAggregationFlushTimer])
 
 	const shouldRunChannelForMode = useCallback(
 		(channel: RuntimeChannel, activeMode: LilacMode): boolean => {
@@ -553,109 +538,6 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		},
 		[flushPendingTranslateInputs]
 	)
-
-	const runTranslateFallbackForCard = useCallback(async (cardId: string) => {
-		if (translateFallbackInFlightCardIdSetRef.current.has(cardId)) return
-		const currentCard = translateCardListRef.current.find(card => card.id === cardId)
-		if (!currentCard) return
-		if (currentCard.status !== 'streaming' && currentCard.status !== 'translating') return
-		const sourceText = normalizeWhitespace(currentCard.sourceText)
-		if (!sourceText) return
-
-		translateFallbackInFlightCardIdSetRef.current.add(cardId)
-		try {
-			const fallbackResult = await translateFallbackAction({
-				myLanguageCode: translateSettingsRef.current.myLanguageCode,
-				sourceText,
-				translateToLanguageCode: translateSettingsRef.current.translateToLanguageCode
-			})
-			if (!fallbackResult.ok) {
-				setTranslateCards(previousCards =>
-					previousCards.map(card => {
-						if (card.id !== cardId) return card
-						if (card.status === 'final' || card.status === 'error') return card
-						return {
-							...card,
-							errorMessage: fallbackResult.error,
-							status: 'error',
-							translatedText: fallbackResult.error
-						}
-					})
-				)
-				return
-			}
-
-			const translationResult = fallbackResult.result
-			setTranslateCards(previousCards =>
-				previousCards.map(card => {
-					if (card.id !== cardId) return card
-					if (card.status === 'final' || card.status === 'error') return card
-					return {
-						...card,
-						direction: translationResult.direction,
-						sourceLanguageCode: normalizeLanguageCode(translationResult.sourceLanguageCode),
-						sourceText: normalizeWhitespace(translationResult.sourceText) || card.sourceText,
-						status: 'final',
-						targetLanguageCode: normalizeLanguageCode(translationResult.targetLanguageCode),
-						translatedText: translationResult.translatedText
-					}
-				})
-			)
-		} catch (error) {
-			const message =
-				error instanceof Error && error.message
-					? error.message
-					: 'Translation retry failed before completion.'
-			setTranslateCards(previousCards =>
-				previousCards.map(card => {
-					if (card.id !== cardId) return card
-					if (card.status === 'final' || card.status === 'error') return card
-					return {
-						...card,
-						errorMessage: message,
-						status: 'error',
-						translatedText: message
-					}
-				})
-			)
-		} finally {
-			translateFallbackInFlightCardIdSetRef.current.delete(cardId)
-		}
-	}, [])
-
-	useEffect(() => {
-		if (mode !== 'translate') {
-			clearAllTranslateFallbackTimeouts()
-			return
-		}
-
-		const activeTranslatingCardIdSet = new Set<string>()
-		for (const card of translateCards) {
-			const translatedText = card.translatedText.trim()
-			if ((card.status !== 'streaming' && card.status !== 'translating') || translatedText) continue
-			activeTranslatingCardIdSet.add(card.id)
-			if (translateFallbackTimeoutByCardIdRef.current.has(card.id)) continue
-			const timeoutId = window.setTimeout(() => {
-				translateFallbackTimeoutByCardIdRef.current.delete(card.id)
-				void runTranslateFallbackForCard(card.id)
-			}, translateFallbackTimeoutMilliseconds)
-			translateFallbackTimeoutByCardIdRef.current.set(card.id, timeoutId)
-		}
-
-		translateFallbackTimeoutByCardIdRef.current.forEach((timeoutId, cardId) => {
-			if (activeTranslatingCardIdSet.has(cardId)) return
-			window.clearTimeout(timeoutId)
-			translateFallbackTimeoutByCardIdRef.current.delete(cardId)
-		})
-
-		return () => {
-			translateFallbackTimeoutByCardIdRef.current.forEach((timeoutId, cardId) => {
-				if (activeTranslatingCardIdSet.has(cardId)) return
-				window.clearTimeout(timeoutId)
-				translateFallbackTimeoutByCardIdRef.current.delete(cardId)
-			})
-		}
-	}, [clearAllTranslateFallbackTimeouts, mode, runTranslateFallbackForCard, translateCards])
 
 	const flushTranslateSegmentAggregation = useCallback(() => {
 		const aggregateState = translateSegmentAggregationStateRef.current
@@ -1023,10 +905,6 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	}, [chatOutputSettings.speechOutputEnabled])
 
 	useEffect(() => {
-		translateCardListRef.current = translateCards
-	}, [translateCards])
-
-	useEffect(() => {
 		modeRef.current = mode
 	}, [mode])
 
@@ -1384,11 +1262,6 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				window.clearTimeout(translateAggregationFlushTimerRef.current)
 				translateAggregationFlushTimerRef.current = null
 			}
-			translateFallbackTimeoutByCardIdRef.current.forEach(timeoutId => {
-				window.clearTimeout(timeoutId)
-			})
-			translateFallbackTimeoutByCardIdRef.current.clear()
-			translateFallbackInFlightCardIdSetRef.current.clear()
 		}
 	}, [])
 
