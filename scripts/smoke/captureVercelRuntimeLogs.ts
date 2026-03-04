@@ -67,6 +67,7 @@ export async function collectRuntimeErrorMatches(runtimeLogPath: string): Promis
 
 	const matchPatterns = [
 		/Unsupported parameter/i,
+		/Unsupported value/i,
 		/Unknown parameter/i,
 		/Invalid 'item\.id'/i,
 		/Unhandled/i,

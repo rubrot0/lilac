@@ -414,11 +414,11 @@ export default function TranslateMode() {
 								<article
 									key={card.id}
 									data-testid={`translate-card-${card.id}`}
-									className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] p-3"
+									className="rounded-lg border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] px-3 py-2.5"
 								>
-									<div className="mb-2 flex items-center justify-between gap-2">
+									<div className="mb-1.5 flex items-center justify-between gap-2">
 										<p
-											className="font-semibold text-xs uppercase tracking-[0.08em]"
+											className="font-semibold text-[0.83rem] tracking-[0.02em]"
 											style={{ color: getDirectionColor(card.direction) }}
 										>
 											{routeLabel}
@@ -433,13 +433,13 @@ export default function TranslateMode() {
 									</div>
 
 									<p
-										className="whitespace-pre-wrap break-words text-[1.18rem] text-[var(--lilac-ink)] leading-snug sm:text-[1.25rem]"
+										className="whitespace-pre-wrap break-words text-[1.05rem] text-[var(--lilac-ink)] leading-snug sm:text-[1.14rem]"
 										data-testid={`translate-card-target-${card.id}`}
 									>
 										{translationText}
 									</p>
 									<p
-										className="mt-2 whitespace-pre-wrap break-words text-[var(--lilac-ink-muted)] text-sm leading-relaxed"
+										className="mt-1.5 whitespace-pre-wrap break-words text-[0.8rem] text-[var(--lilac-ink-muted)] leading-relaxed"
 										data-testid={`translate-card-source-${card.id}`}
 									>
 										<span className="mr-1 font-semibold text-[10px] uppercase tracking-[0.12em]">Heard:</span>

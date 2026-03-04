@@ -3,7 +3,9 @@ import { isValidLanguageCode, normalizeLanguageCode } from '@/realtime/languageC
 import {
 	ChatRealtimeModelSchema,
 	defaultChatRealtimeModel,
-	defaultTranscriptionModel
+	defaultTranscriptionModel,
+	defaultTranslationModel,
+	TranslationModelSchema
 } from '@/realtime/modelConfig'
 
 export const LanguageCodeSchema = z
@@ -66,6 +68,30 @@ export const CreateRealtimeTranscriptionSessionActionOutputSchema = z.object({
 	expiresAt: z.number(),
 	value: z.string().min(1)
 })
+
+export const TranslateFallbackActionInputSchema = z.object({
+	model: TranslationModelSchema.default(defaultTranslationModel),
+	myLanguageCode: LanguageCodeSchema,
+	sourceText: z.string().min(1).max(4000),
+	translateToLanguageCode: LanguageCodeSchema
+})
+
+export const TranslateFallbackActionOutputSchema = z.discriminatedUnion('ok', [
+	z.object({
+		error: z.string().min(1),
+		ok: z.literal(false)
+	}),
+	z.object({
+		ok: z.literal(true),
+		result: z.object({
+			direction: z.enum(['my_to_target', 'target_to_my']),
+			sourceLanguageCode: LanguageCodeSchema,
+			sourceText: z.string().min(1),
+			targetLanguageCode: LanguageCodeSchema,
+			translatedText: z.string().min(1)
+		})
+	})
+])
 
 export const PublishTranslationToolArgumentsSchema = z.object({
 	direction: z.enum(['my_to_target', 'target_to_my']),
@@ -219,6 +245,19 @@ export const ResponseOutputItemDoneEventSchema = z
 			.passthrough(),
 		response_id: z.string().optional(),
 		type: z.literal('response.output_item.done')
+	})
+	.passthrough()
+
+export const ResponseCreatedEventSchema = z
+	.object({
+		response: z
+			.object({
+				id: z.string().optional(),
+				metadata: z.record(z.string(), z.unknown()).optional()
+			})
+			.passthrough()
+			.optional(),
+		type: z.literal('response.created')
 	})
 	.passthrough()
 

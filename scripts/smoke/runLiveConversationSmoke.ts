@@ -278,14 +278,19 @@ async function runTranslateScenario(
 			async function hasTranslateCard(): Promise<boolean> {
 				const cardCount = await page.locator('[data-testid^="translate-card-"]').count()
 				if (cardCount === 0) return false
-				const targetText = await page
+				const targetTextList = await page
 					.locator('[data-testid^="translate-card-target-"]')
-					.first()
-					.innerText()
-				return targetText.trim().length > 0
+					.allInnerTexts()
+				return targetTextList.some(targetText => {
+					const normalizedText = targetText.trim()
+					if (!normalizedText) return false
+					if (normalizedText === 'Translating…') return false
+					if (normalizedText === 'Translating...') return false
+					return true
+				})
 			},
 			45_000,
-			'Translate mode did not produce translation card output.'
+			'Translate mode did not produce finalized translation output.'
 		)
 
 		const subtitleRailText = await page.getByTestId('translate-live-subtitle-rail').innerText()

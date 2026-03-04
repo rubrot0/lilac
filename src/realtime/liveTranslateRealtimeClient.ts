@@ -5,6 +5,7 @@ import {
 	PublishTranslationToolArgumentsSchema,
 	RealtimeBaseServerEventSchema,
 	RealtimeErrorEventSchema,
+	ResponseCreatedEventSchema,
 	ResponseDoneEventSchema,
 	ResponseFunctionCallArgumentsDoneEventSchema,
 	ResponseOutputItemDoneEventSchema
@@ -180,6 +181,7 @@ export class LiveTranslateRealtimeClient {
 	private dataChannel: null | RTCDataChannel = null
 	private generation = 0
 	private pendingRequestIdQueue: string[] = []
+	private pendingRequestIdByResponseId = new Map<string, string>()
 	private pendingResponseContextByRequestId = new Map<string, PendingResponseContext>()
 	private pendingResponseTimeoutByRequestId = new Map<string, number>()
 	private peerConnection: null | RTCPeerConnection = null
@@ -269,6 +271,7 @@ export class LiveTranslateRealtimeClient {
 		})
 		this.pendingResponseTimeoutByRequestId.clear()
 		this.pendingRequestIdQueue = []
+		this.pendingRequestIdByResponseId.clear()
 		this.pendingResponseContextByRequestId.clear()
 		this.sourceItemOrder = []
 
@@ -341,9 +344,13 @@ export class LiveTranslateRealtimeClient {
 		const responseStatus = parseStringValue(response.status)?.toLowerCase() ?? null
 
 		const metadata = response.metadata ?? {}
-		const requestId = parseStringValue(metadata.request_id)
+		const responseId = parseStringValue(response.id) ?? parseStringValue(event.response_id)
+		const requestId =
+			parseStringValue(metadata.request_id) ??
+			(responseId ? (this.pendingRequestIdByResponseId.get(responseId) ?? null) : null)
 		const sourceItemIdFromMetadata = parseStringValue(metadata.source_item_id)
 		const inputOriginFromMetadata = parseStringValue(metadata.input_origin)
+		if (responseId) this.pendingRequestIdByResponseId.delete(responseId)
 
 		const pendingContext = this.resolvePendingContext(requestId)
 		const sourceItemId = sourceItemIdFromMetadata ?? pendingContext?.itemId ?? null
@@ -354,7 +361,6 @@ export class LiveTranslateRealtimeClient {
 		const functionCall = (response.output ?? []).find(
 			item => item.type === 'function_call' && item.name === 'publish_translation'
 		)
-		const responseId = response.id
 		const fallbackToolArguments = responseId
 			? (this.completedToolArgumentsByResponseId.get(responseId) ?? null)
 			: null
@@ -420,6 +426,16 @@ export class LiveTranslateRealtimeClient {
 		}
 	}
 
+	private handleResponseCreatedEvent(
+		event: ReturnType<typeof ResponseCreatedEventSchema.parse>
+	): void {
+		const responseId = parseStringValue(event.response?.id)
+		if (!responseId) return
+		const requestId = parseStringValue(event.response?.metadata?.request_id)
+		if (!requestId) return
+		this.pendingRequestIdByResponseId.set(responseId, requestId)
+	}
+
 	private maybeStorePublishTranslationToolArguments(
 		toolName: null | string,
 		toolArguments: null | string,
@@ -458,6 +474,11 @@ export class LiveTranslateRealtimeClient {
 			const baseEvent = RealtimeBaseServerEventSchema.parse(candidate)
 
 			switch (baseEvent.type) {
+				case 'response.created': {
+					const event = ResponseCreatedEventSchema.parse(candidate)
+					this.handleResponseCreatedEvent(event)
+					return
+				}
 				case 'response.output_item.done': {
 					const event = ResponseOutputItemDoneEventSchema.parse(candidate)
 					this.handleResponseOutputItemDoneEvent(event)

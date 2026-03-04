@@ -1,5 +1,6 @@
 'use server'
 
+import { z } from 'zod'
 import { defaultTranscriptionModel } from '@/realtime/modelConfig'
 import {
 	CreateRealtimeClientSecretActionInputSchema,
@@ -8,7 +9,10 @@ import {
 	CreateRealtimeTranscriptionSessionActionOutputSchema,
 	CreateTranslateRealtimeClientSecretActionInputSchema,
 	CreateTranslateRealtimeClientSecretActionOutputSchema,
-	parseClientSecretResponse
+	PublishTranslationToolArgumentsSchema,
+	parseClientSecretResponse,
+	TranslateFallbackActionInputSchema,
+	TranslateFallbackActionOutputSchema
 } from '@/realtime/schemas'
 import env from '~/env'
 
@@ -17,6 +21,37 @@ const defaultRequestHeaders = {
 	Authorization: `Bearer ${env.OPENAI_API_KEY}`,
 	'Content-Type': 'application/json'
 } satisfies HeadersInit
+
+const CreateChatCompletionResponseSchema = z
+	.object({
+		choices: z
+			.array(
+				z
+					.object({
+						message: z
+							.object({
+								content: z
+									.union([
+										z.string(),
+										z.array(
+											z
+												.object({
+													text: z.string().optional(),
+													type: z.string().optional()
+												})
+												.passthrough()
+										)
+									])
+									.optional()
+							})
+							.passthrough()
+							.optional()
+					})
+					.passthrough()
+			)
+			.min(1)
+	})
+	.passthrough()
 
 type OpenAiErrorPayload = {
 	code?: string
@@ -144,6 +179,44 @@ function buildPublishTranslationToolDefinition(): Record<string, unknown> {
 	}
 }
 
+function createFallbackTranslateInstructions(
+	myLanguageCode: string,
+	translateToLanguageCode: string
+): string {
+	return [
+		'You are Lilac fallback translation.',
+		`Language A: ${myLanguageCode}.`,
+		`Language B: ${translateToLanguageCode}.`,
+		'Detect whether input is language A or B and translate to the opposite language.',
+		'Return only JSON matching the schema.',
+		'Never include commentary, rationale, or extra keys.',
+		'Preserve intent, tone, punctuation, and named entities.'
+	].join('\n')
+}
+
+function extractChatCompletionMessageContent(payload: unknown): string {
+	const parsedPayload = CreateChatCompletionResponseSchema.parse(payload)
+	const firstChoice = parsedPayload.choices[0]
+	if (!firstChoice) throw new Error('Chat completion did not include a choice.')
+	const contentValue = firstChoice.message?.content
+	if (typeof contentValue === 'string') {
+		const normalizedContent = contentValue.trim()
+		if (normalizedContent) return normalizedContent
+	}
+	if (Array.isArray(contentValue)) {
+		let joinedText = ''
+		for (const contentPart of contentValue) {
+			if (!contentPart || typeof contentPart !== 'object') continue
+			const textValue = (contentPart as { text?: unknown }).text
+			if (typeof textValue !== 'string') continue
+			joinedText += textValue
+		}
+		const normalizedJoinedText = joinedText.trim()
+		if (normalizedJoinedText) return normalizedJoinedText
+	}
+	throw new Error('Chat completion did not include structured JSON text output.')
+}
+
 export async function createRealtimeClientSecretAction(input?: unknown): Promise<{
 	expiresAt: number
 	value: string
@@ -235,4 +308,83 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 
 	const parsedSecret = parseClientSecretResponse(payload)
 	return CreateRealtimeTranscriptionSessionActionOutputSchema.parse(parsedSecret)
+}
+
+export async function translateFallbackAction(
+	input: unknown
+): Promise<z.infer<typeof TranslateFallbackActionOutputSchema>> {
+	const parsedInput = TranslateFallbackActionInputSchema.parse(input)
+
+	try {
+		const payload = await postOpenAi('/chat/completions', {
+			messages: [
+				{
+					content: createFallbackTranslateInstructions(
+						parsedInput.myLanguageCode,
+						parsedInput.translateToLanguageCode
+					),
+					role: 'system'
+				},
+				{
+					content: parsedInput.sourceText,
+					role: 'user'
+				}
+			],
+			model: parsedInput.model,
+			response_format: {
+				json_schema: {
+					name: 'publish_translation',
+					schema: {
+						additionalProperties: false,
+						properties: {
+							direction: {
+								enum: ['my_to_target', 'target_to_my'],
+								type: 'string'
+							},
+							sourceLanguageCode: {
+								type: 'string'
+							},
+							sourceText: {
+								type: 'string'
+							},
+							targetLanguageCode: {
+								type: 'string'
+							},
+							translatedText: {
+								type: 'string'
+							}
+						},
+						required: [
+							'sourceText',
+							'sourceLanguageCode',
+							'targetLanguageCode',
+							'translatedText',
+							'direction'
+						],
+						type: 'object'
+					},
+					strict: true
+				},
+				type: 'json_schema'
+			}
+		})
+
+		const messageContent = extractChatCompletionMessageContent(payload)
+		const parsedResult = PublishTranslationToolArgumentsSchema.parse(
+			JSON.parse(messageContent) as unknown
+		)
+		return TranslateFallbackActionOutputSchema.parse({
+			ok: true,
+			result: parsedResult
+		})
+	} catch (error) {
+		const message =
+			error instanceof Error && error.message ? error.message : 'Fallback translation failed.'
+		const debugId = `fallback_${Date.now().toString(36)}`
+		console.error('[translateFallbackAction]', debugId, message)
+		return TranslateFallbackActionOutputSchema.parse({
+			error: `Translation retry failed. (${debugId})`,
+			ok: false
+		})
+	}
 }
