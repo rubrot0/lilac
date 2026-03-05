@@ -538,6 +538,10 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		subtitle: 0,
 		translate: 0
 	})
+	const hasSeenConnectedStateByModeRef = useRef<Record<LilacMode, boolean>>({
+		chat: false,
+		translate: false
+	})
 	const intentionalStopByChannelRef = useRef<Record<RuntimeChannel, boolean>>({
 		chat: false,
 		subtitle: false,
@@ -935,6 +939,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				switch (state) {
 					case 'connected':
 						setErrorMessage(null)
+						hasSeenConnectedStateByModeRef.current.chat = true
 						reconnectAttemptByChannelRef.current.chat = 0
 						return
 					case 'disconnected':
@@ -1551,6 +1556,12 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	}, [chatChannelState, scheduleReconnect, subtitleChannelState, translateChannelState])
 
 	useEffect(() => {
+		if (translateChannelState === 'connected' && subtitleChannelState === 'connected') {
+			hasSeenConnectedStateByModeRef.current.translate = true
+		}
+	}, [subtitleChannelState, translateChannelState])
+
+	useEffect(() => {
 		const nextConnectionHealthState: ConnectionHealthState = {
 			isReconnecting: false,
 			lastErrorAt: connectionHealth.lastErrorAt,
@@ -1600,8 +1611,9 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			mode === 'chat'
 				? chatChannelState !== 'connected'
 				: translateChannelState !== 'connected' && subtitleChannelState !== 'connected'
+		const hasSeenConnectedStateForMode = hasSeenConnectedStateByModeRef.current[mode]
 
-		if (!shouldShowReconnectForMode) {
+		if (!shouldShowReconnectForMode || !hasSeenConnectedStateForMode) {
 			if (typeof reconnectStatusTimerRef.current === 'number') {
 				window.clearTimeout(reconnectStatusTimerRef.current)
 				reconnectStatusTimerRef.current = null
