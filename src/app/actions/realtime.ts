@@ -237,6 +237,9 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 	const payload = await postOpenAi('/realtime/transcription_sessions', {
 		include: ['item.input_audio_transcription.logprobs'],
 		input_audio_format: 'pcm16',
+		input_audio_noise_reduction: {
+			type: 'near_field'
+		},
 		input_audio_transcription: {
 			model: transcriptionModel
 		},

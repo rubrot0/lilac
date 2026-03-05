@@ -50,6 +50,9 @@ function createTranscriptionSessionPatch(): Record<string, unknown> {
 	return {
 		include: ['item.input_audio_transcription.logprobs'],
 		input_audio_format: 'pcm16',
+		input_audio_noise_reduction: {
+			type: 'near_field'
+		},
 		input_audio_transcription: {
 			model: defaultInputTranscriptionModel
 		},
@@ -163,6 +166,7 @@ const manualCommitIntervalMilliseconds = 700
 const minimumCommitAudioDurationMilliseconds = 260
 const speechDetectionHangoverMilliseconds = 220
 const speechDetectionRootMeanSquareThreshold = 0.008
+const transcriptionSampleRateHertz = 24_000
 const shouldEmitVerboseRealtimeLogs = process.env.NEXT_PUBLIC_LILAC_VERBOSE_LOGS === 'true'
 
 function emitSubtitleClientLog(
@@ -379,9 +383,13 @@ export class SubtitleTranscriptionClient {
 		this.micProcessorNode.onaudioprocess = event => {
 			const rawInputBuffer = event.inputBuffer.getChannelData(0)
 			if (!rawInputBuffer || rawInputBuffer.length === 0) return
-			const pcm16Buffer = convertFloat32ToInt16(rawInputBuffer, audioContext.sampleRate, 16_000)
+			const pcm16Buffer = convertFloat32ToInt16(
+				rawInputBuffer,
+				audioContext.sampleRate,
+				transcriptionSampleRateHertz
+			)
 			if (pcm16Buffer.length === 0) return
-			const chunkDurationMilliseconds = (pcm16Buffer.length / 16_000) * 1000
+			const chunkDurationMilliseconds = (pcm16Buffer.length / transcriptionSampleRateHertz) * 1000
 			const chunkRootMeanSquare = computeRootMeanSquare(rawInputBuffer)
 			const hasSpeechActivity = chunkRootMeanSquare >= speechDetectionRootMeanSquareThreshold
 			if (hasSpeechActivity) {
