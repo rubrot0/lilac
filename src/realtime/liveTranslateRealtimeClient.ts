@@ -541,7 +541,7 @@ export class LiveTranslateRealtimeClient {
 					this.settings.translateToLanguageCode
 				),
 				metadata: {
-					draft_sequence: context.draftSequence,
+					draft_sequence: String(context.draftSequence ?? 0),
 					input_origin: context.inputOrigin,
 					request_id: requestId,
 					request_kind: context.requestKind,

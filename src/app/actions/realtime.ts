@@ -240,12 +240,7 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 		input_audio_transcription: {
 			model: transcriptionModel
 		},
-		turn_detection: {
-			prefix_padding_ms: 300,
-			silence_duration_ms: 450,
-			threshold: 0.5,
-			type: 'server_vad'
-		}
+		turn_detection: null
 	})
 
 	const parsedSecret = parseClientSecretResponse(payload)

@@ -53,12 +53,7 @@ function createTranscriptionSessionPatch(): Record<string, unknown> {
 		input_audio_transcription: {
 			model: defaultInputTranscriptionModel
 		},
-		turn_detection: {
-			prefix_padding_ms: 300,
-			silence_duration_ms: 450,
-			threshold: 0.5,
-			type: 'server_vad'
-		}
+		turn_detection: null
 	}
 }
 
@@ -154,6 +149,20 @@ function computeConfidenceFromLogprobs(
 	return Math.round((normalizedProbabilitySum / normalizedProbabilityCount) * 1000) / 1000
 }
 
+function computeRootMeanSquare(sampleList: Float32Array): number {
+	if (sampleList.length === 0) return 0
+	let squareSum = 0
+	for (let sampleIndex = 0; sampleIndex < sampleList.length; sampleIndex += 1) {
+		const sampleValue = sampleList[sampleIndex] ?? 0
+		squareSum += sampleValue * sampleValue
+	}
+	return Math.sqrt(squareSum / sampleList.length)
+}
+
+const manualCommitIntervalMilliseconds = 700
+const minimumCommitAudioDurationMilliseconds = 260
+const speechDetectionHangoverMilliseconds = 220
+const speechDetectionRootMeanSquareThreshold = 0.008
 const shouldEmitVerboseRealtimeLogs = process.env.NEXT_PUBLIC_LILAC_VERBOSE_LOGS === 'true'
 
 function emitSubtitleClientLog(
@@ -183,11 +192,14 @@ function emitSubtitleClientLog(
 export class SubtitleTranscriptionClient {
 	private audioContext: AudioContext | null = null
 	private callbacks: SubtitleTranscriptionClientCallbacks
+	private commitTimerId: null | number = null
 	private committedAtByItemId = new Map<string, number>()
 	private generation = 0
 	private localAudioStream: MediaStream | null = null
 	private micProcessorNode: ScriptProcessorNode | null = null
 	private micSourceNode: MediaStreamAudioSourceNode | null = null
+	private pendingAudioDurationMilliseconds = 0
+	private pendingSpeechHangoverMilliseconds = 0
 	private previousItemIdByItemId = new Map<string, null | string>()
 	private segmentSequence = 0
 	private silentGainNode: GainNode | null = null
@@ -311,6 +323,38 @@ export class SubtitleTranscriptionClient {
 		this.callbacks.onConnectionStateChange(state)
 	}
 
+	private commitAudioBufferIfReady(forceCommit: boolean): void {
+		if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) return
+		if (
+			!forceCommit &&
+			this.pendingAudioDurationMilliseconds < minimumCommitAudioDurationMilliseconds
+		) {
+			return
+		}
+		if (this.pendingAudioDurationMilliseconds <= 0) return
+		this.sendEvent({
+			type: 'input_audio_buffer.commit'
+		})
+		emitSubtitleClientLog('info', 'manual_commit', {
+			audioDurationMilliseconds: Math.round(this.pendingAudioDurationMilliseconds),
+			forceCommit
+		})
+		this.pendingAudioDurationMilliseconds = 0
+	}
+
+	private startManualCommitLoop(): void {
+		this.stopManualCommitLoop()
+		this.commitTimerId = window.setInterval(() => {
+			this.commitAudioBufferIfReady(false)
+		}, manualCommitIntervalMilliseconds)
+	}
+
+	private stopManualCommitLoop(): void {
+		if (typeof this.commitTimerId !== 'number') return
+		window.clearInterval(this.commitTimerId)
+		this.commitTimerId = null
+	}
+
 	private async enableVoiceInput(generation: number): Promise<void> {
 		const stream = await navigator.mediaDevices.getUserMedia({
 			audio: {
@@ -337,6 +381,19 @@ export class SubtitleTranscriptionClient {
 			if (!rawInputBuffer || rawInputBuffer.length === 0) return
 			const pcm16Buffer = convertFloat32ToInt16(rawInputBuffer, audioContext.sampleRate, 16_000)
 			if (pcm16Buffer.length === 0) return
+			const chunkDurationMilliseconds = (pcm16Buffer.length / 16_000) * 1000
+			const chunkRootMeanSquare = computeRootMeanSquare(rawInputBuffer)
+			const hasSpeechActivity = chunkRootMeanSquare >= speechDetectionRootMeanSquareThreshold
+			if (hasSpeechActivity) {
+				this.pendingSpeechHangoverMilliseconds = speechDetectionHangoverMilliseconds
+			} else {
+				this.pendingSpeechHangoverMilliseconds = Math.max(
+					0,
+					this.pendingSpeechHangoverMilliseconds - chunkDurationMilliseconds
+				)
+			}
+			if (!hasSpeechActivity && this.pendingSpeechHangoverMilliseconds <= 0) return
+			this.pendingAudioDurationMilliseconds += chunkDurationMilliseconds
 			const audioBase64 = int16ArrayToBase64(pcm16Buffer)
 			if (!audioBase64) return
 			this.sendEvent({
@@ -349,10 +406,15 @@ export class SubtitleTranscriptionClient {
 		this.micProcessorNode.connect(this.silentGainNode)
 		this.silentGainNode.connect(audioContext.destination)
 
+		this.pendingAudioDurationMilliseconds = 0
+		this.pendingSpeechHangoverMilliseconds = 0
+		this.startManualCommitLoop()
 		this.callbacks.onListeningStateChange(true)
 	}
 
 	private stopVoiceInput(): void {
+		this.commitAudioBufferIfReady(true)
+		this.stopManualCommitLoop()
 		if (this.micProcessorNode) {
 			this.micProcessorNode.disconnect()
 			this.micProcessorNode.onaudioprocess = null
@@ -374,6 +436,8 @@ export class SubtitleTranscriptionClient {
 			track.stop()
 		}
 		this.localAudioStream = null
+		this.pendingAudioDurationMilliseconds = 0
+		this.pendingSpeechHangoverMilliseconds = 0
 	}
 
 	private handleInputAudioBufferCommittedEvent(candidate: unknown): void {
