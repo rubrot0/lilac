@@ -162,8 +162,8 @@ function computeRootMeanSquare(sampleList: Float32Array): number {
 	return Math.sqrt(squareSum / sampleList.length)
 }
 
-const manualCommitIntervalMilliseconds = 700
-const minimumCommitAudioDurationMilliseconds = 260
+const manualCommitIntervalMilliseconds = 360
+const minimumCommitAudioDurationMilliseconds = 180
 const speechDetectionHangoverMilliseconds = 220
 const speechDetectionRootMeanSquareThreshold = 0.008
 const transcriptionSampleRateHertz = 24_000

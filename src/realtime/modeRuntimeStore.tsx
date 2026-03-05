@@ -620,6 +620,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	const subtitleDedupKeyTimestampByKeyRef = useRef<Map<string, number>>(new Map())
 	const subtitleRawSegmentTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const subtitleSegmentTextByItemIdRef = useRef<Map<string, string>>(new Map())
+	const subtitleCommittedSegmentTextByItemIdRef = useRef<Map<string, string>>(new Map())
+	const subtitleSegmentItemIdListByUtteranceIdRef = useRef<Map<string, string[]>>(new Map())
 	const subtitleSourceTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const subtitlePreviousItemIdByItemIdRef = useRef<Map<string, null | string>>(new Map())
 	const subtitleUtteranceIdBySegmentItemIdRef = useRef<Map<string, string>>(new Map())
@@ -710,6 +712,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		clearAllTranslateStreamingTimers()
 		subtitleRawSegmentTextByItemIdRef.current.clear()
 		subtitleSegmentTextByItemIdRef.current.clear()
+		subtitleCommittedSegmentTextByItemIdRef.current.clear()
+		subtitleSegmentItemIdListByUtteranceIdRef.current.clear()
 		subtitleSourceTextByItemIdRef.current.clear()
 		subtitlePreviousItemIdByItemIdRef.current.clear()
 		subtitleUtteranceIdBySegmentItemIdRef.current.clear()
@@ -747,6 +751,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		subtitleDedupKeyTimestampByKeyRef.current.clear()
 		subtitleRawSegmentTextByItemIdRef.current.clear()
 		subtitleSegmentTextByItemIdRef.current.clear()
+		subtitleCommittedSegmentTextByItemIdRef.current.clear()
+		subtitleSegmentItemIdListByUtteranceIdRef.current.clear()
 		subtitleSourceTextByItemIdRef.current.clear()
 		subtitlePreviousItemIdByItemIdRef.current.clear()
 		subtitleUtteranceIdBySegmentItemIdRef.current.clear()
@@ -871,6 +877,65 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		[]
 	)
 
+	const registerUtteranceSegmentItemId = useCallback(
+		(utteranceId: string, segmentItemId: string): void => {
+			const segmentItemIdList =
+				subtitleSegmentItemIdListByUtteranceIdRef.current.get(utteranceId) ?? []
+			if (!segmentItemIdList.includes(segmentItemId)) {
+				subtitleSegmentItemIdListByUtteranceIdRef.current.set(utteranceId, [
+					...segmentItemIdList,
+					segmentItemId
+				])
+			}
+			subtitleUtteranceIdBySegmentItemIdRef.current.set(segmentItemId, utteranceId)
+		},
+		[]
+	)
+
+	const removeUtteranceSegmentItemId = useCallback(
+		(utteranceId: string, segmentItemId: string): void => {
+			const segmentItemIdList =
+				subtitleSegmentItemIdListByUtteranceIdRef.current.get(utteranceId) ?? []
+			if (segmentItemIdList.length === 0) return
+			const nextSegmentItemIdList = segmentItemIdList.filter(
+				candidateSegmentItemId => candidateSegmentItemId !== segmentItemId
+			)
+			if (nextSegmentItemIdList.length === 0) {
+				subtitleSegmentItemIdListByUtteranceIdRef.current.delete(utteranceId)
+			} else {
+				subtitleSegmentItemIdListByUtteranceIdRef.current.set(utteranceId, nextSegmentItemIdList)
+			}
+			subtitleUtteranceIdBySegmentItemIdRef.current.delete(segmentItemId)
+		},
+		[]
+	)
+
+	const composeUtteranceSourceText = useCallback((utteranceId: string): string => {
+		const segmentItemIdList = subtitleSegmentItemIdListByUtteranceIdRef.current.get(utteranceId) ?? []
+		let composedSourceText = ''
+		for (const segmentItemId of segmentItemIdList) {
+			const segmentText = normalizeWhitespace(
+				subtitleCommittedSegmentTextByItemIdRef.current.get(segmentItemId) ??
+					subtitleSegmentTextByItemIdRef.current.get(segmentItemId) ??
+					''
+			)
+			if (!segmentText) continue
+			composedSourceText = mergeUtteranceText(composedSourceText, segmentText)
+		}
+		return normalizeWhitespace(composedSourceText)
+	}, [])
+
+	const clearUtteranceSegmentState = useCallback((utteranceId: string): void => {
+		const segmentItemIdList = subtitleSegmentItemIdListByUtteranceIdRef.current.get(utteranceId) ?? []
+		for (const segmentItemId of segmentItemIdList) {
+			subtitleRawSegmentTextByItemIdRef.current.delete(segmentItemId)
+			subtitleSegmentTextByItemIdRef.current.delete(segmentItemId)
+			subtitleCommittedSegmentTextByItemIdRef.current.delete(segmentItemId)
+			subtitleUtteranceIdBySegmentItemIdRef.current.delete(segmentItemId)
+		}
+		subtitleSegmentItemIdListByUtteranceIdRef.current.delete(utteranceId)
+	}, [])
+
 	const upsertSubtitleCard = useCallback(
 		(itemId: string, previousItemId: null | string | undefined, sourceText: string): void => {
 			const normalizedText = normalizeWhitespace(sourceText)
@@ -982,8 +1047,12 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		(patch: SubtitleFinalPatch) => {
 			const normalizedText = sanitizeSubtitleText(patch.text)
 			subtitleRawSegmentTextByItemIdRef.current.delete(patch.itemId)
+			const resolvedUtterance = resolveAudioUtterance(patch.itemId, patch.previousItemId)
+			registerUtteranceSegmentItemId(resolvedUtterance.id, patch.itemId)
 			if (!normalizedText) {
 				subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
+				subtitleCommittedSegmentTextByItemIdRef.current.delete(patch.itemId)
+				removeUtteranceSegmentItemId(resolvedUtterance.id, patch.itemId)
 				return
 			}
 
@@ -996,6 +1065,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			const previousTimestamp = subtitleDedupKeyTimestampByKeyRef.current.get(dedupeKey)
 			if (typeof previousTimestamp === 'number' && now - previousTimestamp < 2500) {
 				subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
+				subtitleCommittedSegmentTextByItemIdRef.current.delete(patch.itemId)
+				removeUtteranceSegmentItemId(resolvedUtterance.id, patch.itemId)
 				return
 			}
 			subtitleDedupKeyTimestampByKeyRef.current.set(dedupeKey, now)
@@ -1003,18 +1074,10 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				if (now - value > 10_000) subtitleDedupKeyTimestampByKeyRef.current.delete(key)
 			})
 
-			const resolvedUtterance = resolveAudioUtterance(patch.itemId, patch.previousItemId)
-			const existingSourceText = subtitleSourceTextByItemIdRef.current.get(resolvedUtterance.id) ?? ''
-			const segmentText = subtitleSegmentTextByItemIdRef.current.get(patch.itemId) ?? ''
-			const shouldMergeFinalText =
-				!existingSourceText ||
-				!segmentText ||
-				!isEquivalentTranscriptionChunk(segmentText, normalizedText)
-			const mergedSourceText = shouldMergeFinalText
-				? mergeUtteranceText(existingSourceText, normalizedText)
-				: existingSourceText
 			subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
-			subtitleSourceTextByItemIdRef.current.set(resolvedUtterance.id, mergedSourceText)
+			subtitleCommittedSegmentTextByItemIdRef.current.set(patch.itemId, normalizedText)
+			const composedSourceText = composeUtteranceSourceText(resolvedUtterance.id)
+			subtitleSourceTextByItemIdRef.current.set(resolvedUtterance.id, composedSourceText)
 			subtitlePreviousItemIdByItemIdRef.current.set(resolvedUtterance.id, resolvedUtterance.previousId)
 			subtitleCommittedAtByItemIdRef.current.set(resolvedUtterance.id, patch.committedAt)
 			if (typeof patch.confidence === 'number') {
@@ -1026,7 +1089,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			}
 
 			clearTranslateDraftTimerByItemId(resolvedUtterance.id)
-			upsertSubtitleCard(resolvedUtterance.id, resolvedUtterance.previousId, mergedSourceText)
+			upsertSubtitleCard(resolvedUtterance.id, resolvedUtterance.previousId, composedSourceText)
 			setLiveSubtitleState(previousState => ({
 				...previousState,
 				activeSegmentId: resolvedUtterance.id,
@@ -1038,6 +1101,9 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		},
 		[
 			clearTranslateDraftTimerByItemId,
+			composeUtteranceSourceText,
+			registerUtteranceSegmentItemId,
+			removeUtteranceSegmentItemId,
 			resolveAudioUtterance,
 			scheduleDraftTranslateForItem,
 			scheduleFinalTranslateForItem,
@@ -1156,7 +1222,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			onResultPatch: patch => {
 				clearTranslateDraftTimerByItemId(patch.itemId)
 				clearTranslateFinalTimerByItemId(patch.itemId)
-				subtitleRawSegmentTextByItemIdRef.current.delete(patch.itemId)
+				clearUtteranceSegmentState(patch.itemId)
 				subtitleSourceTextByItemIdRef.current.delete(patch.itemId)
 				subtitlePreviousItemIdByItemIdRef.current.delete(patch.itemId)
 				subtitlePreviousUtteranceIdByUtteranceIdRef.current.delete(patch.itemId)
@@ -1189,6 +1255,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			translateToLanguageCode: translateSettingsRef.current.translateToLanguageCode
 		})
 	}, [
+		clearUtteranceSegmentState,
 		clearReconnectTimer,
 		clearTranslateDraftTimerByItemId,
 		clearTranslateFinalTimerByItemId,
@@ -1234,6 +1301,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				const previousRawSegmentText = subtitleRawSegmentTextByItemIdRef.current.get(patch.itemId) ?? ''
 				const nextRawSegmentText = `${previousRawSegmentText}${patch.textDelta}`
 				subtitleRawSegmentTextByItemIdRef.current.set(patch.itemId, nextRawSegmentText)
+				const resolvedUtterance = resolveAudioUtterance(patch.itemId, patch.previousItemId)
+				registerUtteranceSegmentItemId(resolvedUtterance.id, patch.itemId)
 				const sanitizedSegmentText = sanitizeSubtitleText(nextRawSegmentText)
 				if (!sanitizedSegmentText) {
 					subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
@@ -1247,9 +1316,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 					return
 				}
 				subtitleSegmentTextByItemIdRef.current.set(patch.itemId, sanitizedSegmentText)
-				const resolvedUtterance = resolveAudioUtterance(patch.itemId, patch.previousItemId)
 				const previousSourceText = subtitleSourceTextByItemIdRef.current.get(resolvedUtterance.id) ?? ''
-				const mergedSourceText = mergeUtteranceText(previousSourceText, sanitizedSegmentText)
+				const mergedSourceText = composeUtteranceSourceText(resolvedUtterance.id)
 				if (mergedSourceText === previousSourceText) return
 				subtitleSourceTextByItemIdRef.current.set(resolvedUtterance.id, mergedSourceText)
 				subtitlePreviousItemIdByItemIdRef.current.set(
@@ -1279,8 +1347,10 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			voiceInputEnabled: voiceInputEnabledRef.current
 		})
 	}, [
+		composeUtteranceSourceText,
 		clearReconnectTimer,
 		handleTranslateSubtitleFinalPatch,
+		registerUtteranceSegmentItemId,
 		resolveAudioUtterance,
 		scheduleDraftTranslateForItem,
 		scheduleFinalTranslateForItem,
@@ -1402,6 +1472,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			clearAllTranslateStreamingTimers()
 			subtitleRawSegmentTextByItemIdRef.current.clear()
 			subtitleSegmentTextByItemIdRef.current.clear()
+			subtitleCommittedSegmentTextByItemIdRef.current.clear()
+			subtitleSegmentItemIdListByUtteranceIdRef.current.clear()
 			subtitleSourceTextByItemIdRef.current.clear()
 			subtitlePreviousItemIdByItemIdRef.current.clear()
 			subtitleUtteranceIdBySegmentItemIdRef.current.clear()
