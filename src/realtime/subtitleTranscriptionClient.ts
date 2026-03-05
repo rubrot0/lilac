@@ -54,8 +54,6 @@ function createTranscriptionSessionPatch(): Record<string, unknown> {
 			model: defaultInputTranscriptionModel
 		},
 		turn_detection: {
-			create_response: false,
-			interrupt_response: false,
 			prefix_padding_ms: 300,
 			silence_duration_ms: 450,
 			threshold: 0.5,
