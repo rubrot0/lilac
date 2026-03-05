@@ -77,6 +77,31 @@ type PendingResponseContext = {
 const finalTranslationResponseTimeoutMilliseconds = 8_000
 const draftTranslationResponseTimeoutMilliseconds = 5_000
 const channelConnectTimeoutMilliseconds = 7_000
+const shouldEmitVerboseRealtimeLogs = process.env.NEXT_PUBLIC_LILAC_VERBOSE_LOGS === 'true'
+
+function emitLiveTranslateLog(
+	level: 'error' | 'info' | 'warn',
+	event: string,
+	details: Record<string, unknown>
+): void {
+	if (level === 'info' && !shouldEmitVerboseRealtimeLogs) return
+	const payload = {
+		...details,
+		event,
+		scope: 'live_translate',
+		timestamp: new Date().toISOString()
+	}
+	switch (level) {
+		case 'error':
+			console.error('[lilac.realtime]', payload)
+			return
+		case 'warn':
+			console.warn('[lilac.realtime]', payload)
+			return
+		default:
+			console.info('[lilac.realtime]', payload)
+	}
+}
 
 function createTranslateInstructions(
 	myLanguageCode: string,
@@ -217,6 +242,7 @@ export class LiveTranslateRealtimeClient {
 	private latestDraftSequenceByItemId = new Map<string, number>()
 	private pendingRequestContextByRequestId = new Map<string, PendingResponseContext>()
 	private pendingRequestIdByResponseId = new Map<string, string>()
+	private pendingUnmappedRequestIdQueue: string[] = []
 	private pendingRequestTimeoutByRequestId = new Map<string, number>()
 	private peerConnection: null | RTCPeerConnection = null
 	private settings: LiveTranslateSettings = {
@@ -268,6 +294,7 @@ export class LiveTranslateRealtimeClient {
 				if (generation !== this.generation) return
 				this.clearConnectTimeout()
 				this.setState('connected')
+				emitLiveTranslateLog('info', 'channel_open', { generation })
 				this.updateTranslateSettings(this.settings)
 			})
 
@@ -275,6 +302,7 @@ export class LiveTranslateRealtimeClient {
 				if (generation !== this.generation) return
 				this.clearConnectTimeout()
 				this.setState('disconnected')
+				emitLiveTranslateLog('warn', 'channel_close', { generation })
 			})
 
 			dataChannel.addEventListener('message', event => {
@@ -305,6 +333,10 @@ export class LiveTranslateRealtimeClient {
 		} catch (error) {
 			if (generation !== this.generation) return
 			this.setState('error')
+			emitLiveTranslateLog('error', 'start_failed', {
+				generation,
+				message: error instanceof Error ? error.message : 'unknown'
+			})
 			const fallbackMessage = 'Unable to start Translate mode.'
 			if (error instanceof Error) this.callbacks.onError(error.message || fallbackMessage)
 			else this.callbacks.onError(fallbackMessage)
@@ -322,6 +354,7 @@ export class LiveTranslateRealtimeClient {
 		this.pendingRequestTimeoutByRequestId.clear()
 		this.pendingRequestContextByRequestId.clear()
 		this.pendingRequestIdByResponseId.clear()
+		this.pendingUnmappedRequestIdQueue = []
 		this.draftResponseTextByResponseId.clear()
 		this.toolArgumentsByResponseId.clear()
 		this.draftRequestIdsByItemId.clear()
@@ -434,6 +467,9 @@ export class LiveTranslateRealtimeClient {
 	private clearPendingRequestState(requestId: string): null | PendingResponseContext {
 		const context = this.pendingRequestContextByRequestId.get(requestId) ?? null
 		this.pendingRequestContextByRequestId.delete(requestId)
+		this.pendingUnmappedRequestIdQueue = this.pendingUnmappedRequestIdQueue.filter(
+			candidateRequestId => candidateRequestId !== requestId
+		)
 		this.pendingRequestIdByResponseId.forEach((mappedRequestId, responseId) => {
 			if (mappedRequestId !== requestId) return
 			this.pendingRequestIdByResponseId.delete(responseId)
@@ -467,14 +503,23 @@ export class LiveTranslateRealtimeClient {
 		draftRequestIdSet.add(requestId)
 		this.draftRequestIdsByItemId.set(context.itemId, draftRequestIdSet)
 		this.pendingRequestContextByRequestId.set(requestId, context)
+		this.pendingUnmappedRequestIdQueue.push(requestId)
 
 		const timeoutId = window.setTimeout(() => {
 			const timedOutContext = this.clearPendingRequestState(requestId)
 			if (!timedOutContext || timedOutContext.requestKind !== 'draft') return
 			if (this.isDraftResponseSuperseded(timedOutContext)) return
-			this.callbacks.onError('Draft translation timed out before output was returned.')
+			emitLiveTranslateLog('warn', 'draft_timeout', {
+				itemId: timedOutContext.itemId,
+				requestId: timedOutContext.requestId
+			})
 		}, draftTranslationResponseTimeoutMilliseconds)
 		this.pendingRequestTimeoutByRequestId.set(requestId, timeoutId)
+		emitLiveTranslateLog('info', 'draft_request_sent', {
+			draftSequence: context.draftSequence,
+			itemId: context.itemId,
+			requestId
+		})
 
 		this.sendEvent({
 			response: {
@@ -520,6 +565,7 @@ export class LiveTranslateRealtimeClient {
 			requestKind: 'final'
 		}
 		this.pendingRequestContextByRequestId.set(requestId, context)
+		this.pendingUnmappedRequestIdQueue.push(requestId)
 
 		const timeoutId = window.setTimeout(() => {
 			const timedOutContext = this.clearPendingRequestState(requestId)
@@ -532,6 +578,10 @@ export class LiveTranslateRealtimeClient {
 			this.callbacks.onError(errorPatch.translatedText)
 		}, finalTranslationResponseTimeoutMilliseconds)
 		this.pendingRequestTimeoutByRequestId.set(requestId, timeoutId)
+		emitLiveTranslateLog('info', 'final_request_sent', {
+			itemId: context.itemId,
+			requestId
+		})
 
 		this.sendEvent({
 			response: {
@@ -604,8 +654,24 @@ export class LiveTranslateRealtimeClient {
 		event: ReturnType<typeof ResponseCreatedEventSchema.parse>
 	): void {
 		const responseId = parseStringValue(event.response?.id)
-		const requestId = parseStringValue(event.response?.metadata?.request_id)
-		if (!responseId || !requestId) return
+		if (!responseId) return
+		const metadataRequestId = parseStringValue(event.response?.metadata?.request_id)
+		const requestId = (() => {
+			if (metadataRequestId && this.pendingRequestContextByRequestId.has(metadataRequestId)) {
+				return metadataRequestId
+			}
+			while (this.pendingUnmappedRequestIdQueue.length > 0) {
+				const fallbackRequestId = this.pendingUnmappedRequestIdQueue.shift()
+				if (!fallbackRequestId) continue
+				if (!this.pendingRequestContextByRequestId.has(fallbackRequestId)) continue
+				return fallbackRequestId
+			}
+			return null
+		})()
+		if (!requestId) {
+			emitLiveTranslateLog('warn', 'response_created_without_request_mapping', { responseId })
+			return
+		}
 		this.pendingRequestIdByResponseId.set(responseId, requestId)
 	}
 
@@ -739,6 +805,11 @@ export class LiveTranslateRealtimeClient {
 			inferredArguments
 
 		if (!rawToolArguments) {
+			emitLiveTranslateLog('warn', 'missing_publish_translation_tool_call', {
+				itemId: context.itemId,
+				requestId,
+				responseId: responseId ?? undefined
+			})
 			const errorPatch = this.createErrorPatch(
 				context,
 				'No valid publish_translation tool call was returned.',
@@ -752,6 +823,11 @@ export class LiveTranslateRealtimeClient {
 		try {
 			const parsedArguments = JSON.parse(rawToolArguments) as unknown
 			const parsedResult = PublishTranslationToolArgumentsSchema.parse(parsedArguments)
+			emitLiveTranslateLog('info', 'final_result_patch', {
+				direction: parsedResult.direction,
+				itemId: context.itemId,
+				responseId: responseId ?? undefined
+			})
 			this.callbacks.onResultPatch({
 				direction: parsedResult.direction,
 				inputOrigin: context.inputOrigin,
@@ -764,6 +840,11 @@ export class LiveTranslateRealtimeClient {
 				...(responseId ? { responseId } : {})
 			})
 		} catch {
+			emitLiveTranslateLog('error', 'malformed_tool_arguments', {
+				itemId: context.itemId,
+				requestId,
+				responseId: responseId ?? undefined
+			})
 			const errorPatch = this.createErrorPatch(
 				context,
 				'Tool arguments were malformed and could not be parsed.',
@@ -776,6 +857,7 @@ export class LiveTranslateRealtimeClient {
 
 	private handleRealtimeErrorEvent(event: ReturnType<typeof RealtimeErrorEventSchema.parse>): void {
 		const message = event.error?.message || 'Realtime session error'
+		emitLiveTranslateLog('error', 'realtime_error', { message })
 		this.callbacks.onError(message)
 	}
 

@@ -26,6 +26,7 @@ type ScenarioResult = {
 const genericServerComponentErrorText =
 	'An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details.'
 const missingSessionTypeErrorText = "Missing required parameter: 'session.type'."
+const unknownSessionTypeErrorText = "Unknown parameter: 'session.type'."
 const invalidItemIdErrorText = "Invalid 'item.id':"
 const missingToolCallErrorTextList = [
 	'No valid publish_translation tool call was returned.',
@@ -33,6 +34,7 @@ const missingToolCallErrorTextList = [
 ]
 const trackedProtocolErrorTextList = [
 	missingSessionTypeErrorText,
+	unknownSessionTypeErrorText,
 	invalidItemIdErrorText,
 	...missingToolCallErrorTextList
 ]
@@ -201,6 +203,16 @@ async function runChatScenario(page: Page, artifactDirectoryPath: string): Promi
 	try {
 		await switchToModeWithRetry(page, 'chat')
 		await waitForConnectionLive(page)
+		const initialStatusMessageText = await page
+			.getByTestId('mode-status-message')
+			.innerText()
+			.catch(() => '')
+		if (
+			initialStatusMessageText.includes('Offline. Waiting for network…') ||
+			initialStatusMessageText.includes('Reconnecting…')
+		) {
+			throw new Error('Chat mode remained in offline/reconnecting banner state after connection.')
+		}
 
 		await openGlobalSettings(page)
 		await clickSliderByRatio(page, 'chat-turn-delay-slider', 0.68)
@@ -237,6 +249,32 @@ async function runChatScenario(page: Page, artifactDirectoryPath: string): Promi
 			35_000,
 			'Chat mode did not produce a follow-up assistant transcript.'
 		)
+
+		const orderingIsValid = await page.evaluate((typedMessageValue: string) => {
+			const rowNodeList = Array.from(
+				document.querySelectorAll<HTMLElement>('[data-testid^="chat-row-"]')
+			)
+			if (rowNodeList.length === 0) return false
+			const orderedRows = rowNodeList.map(rowNode => {
+				const role = rowNode.dataset.chatRole
+				const textNode = rowNode.querySelector<HTMLElement>('[data-testid^="chat-message-text-"]')
+				return {
+					role,
+					text: textNode?.innerText.trim() ?? ''
+				}
+			})
+			const typedMessageIndex = orderedRows.findIndex(
+				row => row.role === 'user' && row.text.includes(typedMessageValue)
+			)
+			if (typedMessageIndex === -1) return false
+			const assistantAfterTypedIndex = orderedRows.findIndex(
+				(row, index) => index > typedMessageIndex && row.role === 'assistant'
+			)
+			return assistantAfterTypedIndex > typedMessageIndex
+		}, typedMessage)
+		if (!orderingIsValid) {
+			throw new Error('Chat timeline order was invalid (assistant rendered before user turn).')
+		}
 	} catch (error) {
 		failures.push(error instanceof Error ? error.message : 'Chat mode validation failed.')
 	}
@@ -289,6 +327,12 @@ async function runTranslateScenario(
 			bodyTextAfterLanguageChange.includes('FINAL')
 		) {
 			throw new Error('Translate mode rendered internal status chips in user-facing UI.')
+		}
+		if (
+			bodyTextAfterLanguageChange.includes('Offline. Waiting for network…') ||
+			bodyTextAfterLanguageChange.includes('Reconnecting…')
+		) {
+			throw new Error('Translate mode remained in offline/reconnecting banner state after connection.')
 		}
 
 		const typedTranslateInput = `translate smoke ${Date.now()}`
@@ -354,11 +398,6 @@ async function runTranslateScenario(
 			draftLatencyMilliseconds >= translateLatencyMilliseconds
 		) {
 			throw new Error('Translate mode did not emit draft output before final output.')
-		}
-
-		const subtitleRailText = await page.getByTestId('translate-live-subtitle-rail').innerText()
-		if (!subtitleRailText.trim()) {
-			throw new Error('Translate subtitle rail did not render text.')
 		}
 	} catch (error) {
 		failures.push(error instanceof Error ? error.message : 'Translate mode validation failed.')

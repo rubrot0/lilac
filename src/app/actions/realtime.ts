@@ -239,7 +239,7 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 		input_audio_format: 'pcm16',
 		input_audio_transcription: {
 			model: transcriptionModel,
-			prompt: 'Transcribe spoken audio faithfully. Preserve punctuation and proper nouns.'
+			prompt: 'Transcribe spoken words only. Do not add labels, metadata, or context notes.'
 		},
 		turn_detection: {
 			eagerness: parsedInput.turnEagerness,

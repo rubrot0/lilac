@@ -37,6 +37,34 @@ function normalizeTurnDelaySeconds(value: number): number {
 	return Math.round(clampedValue * 10) / 10
 }
 
+function resolveLiveIndicatorLabel(connectionState: string, statusMessage: null | string): string {
+	if (statusMessage === 'Offline. Waiting for network…') return 'Offline'
+	switch (connectionState) {
+		case 'connected':
+			return 'Live'
+		case 'connecting':
+			return 'Connecting'
+		case 'error':
+			return 'Error'
+		default:
+			return statusMessage ? 'Reconnecting' : 'Idle'
+	}
+}
+
+function resolveLiveIndicatorClass(connectionState: string, statusMessage: null | string): string {
+	if (statusMessage === 'Offline. Waiting for network…') return 'bg-[var(--destructive)]'
+	switch (connectionState) {
+		case 'connected':
+			return 'bg-[var(--lilac-direction-secondary)]'
+		case 'connecting':
+			return 'animate-pulse bg-[var(--lilac-direction-secondary)]/70'
+		case 'error':
+			return 'bg-[var(--destructive)]'
+		default:
+			return 'bg-[var(--lilac-border-strong)]'
+	}
+}
+
 function renderMode(mode: LilacMode): ReactNode {
 	switch (mode) {
 		case 'chat':
@@ -238,6 +266,8 @@ export default function ModeShell() {
 	const [draftInstructions, setDraftInstructions] = useState(chatInstructions)
 	const [draftTurnDelaySeconds, setDraftTurnDelaySeconds] = useState(chatTurnDelaySeconds)
 	const [saveMessage, setSaveMessage] = useState('')
+	const liveIndicatorLabel = resolveLiveIndicatorLabel(connectionState, statusMessage)
+	const liveIndicatorClass = resolveLiveIndicatorClass(connectionState, statusMessage)
 
 	useEffect(() => {
 		setDraftInstructions(chatInstructions)
@@ -275,6 +305,17 @@ export default function ModeShell() {
 						</div>
 
 						<div className="flex items-center gap-2">
+							<output
+								className="inline-flex items-center gap-1.5 rounded-full border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-2 py-1"
+								data-testid="mode-live-indicator"
+								aria-live="polite"
+							>
+								<span className={`h-1.5 w-1.5 rounded-full ${liveIndicatorClass}`} />
+								<span className="font-medium text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
+									{liveIndicatorLabel}
+								</span>
+							</output>
+
 							<Tabs
 								value={mode}
 								onValueChange={value => {
@@ -416,7 +457,7 @@ export default function ModeShell() {
 						</div>
 					</div>
 
-					{statusMessage ? (
+					{statusMessage && connectionState !== 'connected' ? (
 						<p className="pt-2 text-[var(--lilac-ink-muted)] text-xs" data-testid="mode-status-message">
 							{statusMessage}
 						</p>

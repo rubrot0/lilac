@@ -74,12 +74,6 @@ export default function ChatMode() {
 
 	return (
 		<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
-			<div className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card)] px-3 py-2">
-				<div className="font-semibold text-[11px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.12em]">
-					Conversation
-				</div>
-			</div>
-
 			<ScrollArea
 				ref={transcriptScrollAreaRef}
 				data-testid="chat-transcript-list"
@@ -99,7 +93,8 @@ export default function ChatMode() {
 								<div
 									key={message.id}
 									className="flex flex-col gap-1"
-									data-testid={`chat-message-${message.id}`}
+									data-chat-role={message.role}
+									data-testid={`chat-row-${message.id}`}
 								>
 									<div
 										className={`px-1 font-semibold text-[10px] uppercase tracking-[0.16em] ${

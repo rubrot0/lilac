@@ -3,10 +3,12 @@
 import { createRealtimeClientSecretAction } from '@/app/actions/realtime'
 import {
 	ConversationItemCreatedEventSchema,
+	InputAudioBufferCommittedEventSchema,
 	InputAudioTranscriptionCompletedEventSchema,
 	InputAudioTranscriptionDeltaEventSchema,
 	RealtimeBaseServerEventSchema,
 	RealtimeErrorEventSchema,
+	ResponseCreatedEventSchema,
 	ResponseDoneEventSchema,
 	ResponseOutputAudioTranscriptDeltaEventSchema,
 	ResponseOutputItemAddedEventSchema,
@@ -20,6 +22,8 @@ export type ChatTranscriptPatch = {
 	id: string
 	replaceText?: string
 	role: 'assistant' | 'user'
+	slotId?: string
+	slotOrder?: number
 	source: ChatTranscriptSource
 	status?: 'final' | 'streaming'
 }
@@ -47,12 +51,44 @@ function createClientItemId(prefix: string): string {
 	return `${prefix}_${randomSegment}`
 }
 
+const shouldEmitVerboseRealtimeLogs = process.env.NEXT_PUBLIC_LILAC_VERBOSE_LOGS === 'true'
+
+function emitChatRealtimeLog(
+	level: 'error' | 'info' | 'warn',
+	event: string,
+	details: Record<string, unknown>
+): void {
+	if (level === 'info' && !shouldEmitVerboseRealtimeLogs) return
+	const payload = {
+		...details,
+		event,
+		scope: 'chat_realtime',
+		timestamp: new Date().toISOString()
+	}
+	switch (level) {
+		case 'error':
+			console.error('[lilac.realtime]', payload)
+			return
+		case 'warn':
+			console.warn('[lilac.realtime]', payload)
+			return
+		default:
+			console.info('[lilac.realtime]', payload)
+	}
+}
+
 export class ChatRealtimeClient {
+	private unassignedResponseIdQueue: string[] = []
 	private assistantItemIdByResponseId = new Map<string, string>()
+	private nextSlotOrder = 1
 	private callbacks: ChatRealtimeClientCallbacks
 	private dataChannel: null | RTCDataChannel = null
 	private generation = 0
 	private localAudioStream: MediaStream | null = null
+	private slotByAssistantItemId = new Map<string, { slotId: string; slotOrder: number }>()
+	private slotByResponseId = new Map<string, { slotId: string; slotOrder: number }>()
+	private slotByUserItemId = new Map<string, { slotId: string; slotOrder: number }>()
+	private slotOrderBySlotId = new Map<string, number>()
 	private pendingAudioTranscriptByResponseId = new Map<string, string>()
 	private pendingTextByResponseId = new Map<string, string>()
 	private peerConnection: null | RTCPeerConnection = null
@@ -106,11 +142,13 @@ export class ChatRealtimeClient {
 			dataChannel.addEventListener('open', () => {
 				if (generation !== this.generation) return
 				this.callbacks.onConnectionStateChange('connected')
+				emitChatRealtimeLog('info', 'channel_open', { generation })
 			})
 
 			dataChannel.addEventListener('close', () => {
 				if (generation !== this.generation) return
 				this.callbacks.onConnectionStateChange('disconnected')
+				emitChatRealtimeLog('warn', 'channel_close', { generation })
 			})
 
 			dataChannel.addEventListener('message', event => {
@@ -143,6 +181,10 @@ export class ChatRealtimeClient {
 			if (generation !== this.generation) return
 			this.callbacks.onConnectionStateChange('error')
 			const fallbackMessage = 'Unable to start Chat mode.'
+			emitChatRealtimeLog('error', 'start_failed', {
+				generation,
+				message: error instanceof Error ? error.message : 'unknown'
+			})
 			if (error instanceof Error) this.callbacks.onError(error.message || fallbackMessage)
 			else this.callbacks.onError(fallbackMessage)
 			this.stop()
@@ -151,7 +193,13 @@ export class ChatRealtimeClient {
 
 	public stop(): void {
 		this.generation += 1
+		this.unassignedResponseIdQueue = []
 		this.assistantItemIdByResponseId.clear()
+		this.slotByAssistantItemId.clear()
+		this.slotByResponseId.clear()
+		this.slotByUserItemId.clear()
+		this.slotOrderBySlotId.clear()
+		this.nextSlotOrder = 1
 		this.pendingTextByResponseId.clear()
 		this.pendingAudioTranscriptByResponseId.clear()
 
@@ -177,10 +225,13 @@ export class ChatRealtimeClient {
 		const normalizedText = text.trim()
 		if (!normalizedText) return
 		const itemId = createClientItemId('typed')
+		const slot = this.createOrGetSlotForUserItem(itemId)
 		this.emitTranscriptPatch({
 			id: itemId,
 			replaceText: normalizedText,
 			role: 'user',
+			slotId: slot.slotId,
+			slotOrder: slot.slotOrder,
 			source: 'input_text',
 			status: 'final'
 		})
@@ -200,6 +251,10 @@ export class ChatRealtimeClient {
 		})
 		this.sendEvent({
 			type: 'response.create'
+		})
+		emitChatRealtimeLog('info', 'typed_input_submitted', {
+			itemId,
+			textLength: normalizedText.length
 		})
 	}
 
@@ -277,13 +332,76 @@ export class ChatRealtimeClient {
 		this.callbacks.onTranscriptPatch(patch)
 	}
 
+	private createOrGetSlotForUserItem(userItemId: string): { slotId: string; slotOrder: number } {
+		const existingSlot = this.slotByUserItemId.get(userItemId)
+		if (existingSlot) return existingSlot
+		const slotId = createClientItemId('chat_slot')
+		const slotOrder = this.nextSlotOrder
+		this.nextSlotOrder += 1
+		const nextSlot = { slotId, slotOrder }
+		this.slotByUserItemId.set(userItemId, nextSlot)
+		this.slotOrderBySlotId.set(slotId, slotOrder)
+		return nextSlot
+	}
+
+	private getOldestPendingSlot(): null | { slotId: string; slotOrder: number } {
+		const assignedSlotIdSet = new Set(
+			Array.from(this.slotByAssistantItemId.values()).map(slot => slot.slotId)
+		)
+		let oldestPendingSlot: null | { slotId: string; slotOrder: number } = null
+		for (const slot of Array.from(this.slotByUserItemId.values())) {
+			if (assignedSlotIdSet.has(slot.slotId)) continue
+			if (!oldestPendingSlot || slot.slotOrder < oldestPendingSlot.slotOrder) {
+				oldestPendingSlot = slot
+			}
+		}
+		return oldestPendingSlot
+	}
+
+	private bindResponseToSlot(responseId: string): void {
+		const existingSlot = this.slotByResponseId.get(responseId)
+		if (existingSlot) return
+		const oldestPendingSlot = this.getOldestPendingSlot()
+		if (!oldestPendingSlot) {
+			if (!this.unassignedResponseIdQueue.includes(responseId)) {
+				this.unassignedResponseIdQueue.push(responseId)
+			}
+			return
+		}
+		this.slotByResponseId.set(responseId, oldestPendingSlot)
+	}
+
+	private attachQueuedResponsesToUserSlot(): void {
+		if (this.unassignedResponseIdQueue.length === 0) return
+		const responseId = this.unassignedResponseIdQueue.shift()
+		if (!responseId) return
+		this.bindResponseToSlot(responseId)
+	}
+
+	private resolveSlotForAssistantMessage(
+		assistantItemId?: string,
+		responseId?: string
+	): null | { slotId: string; slotOrder: number } {
+		if (assistantItemId) {
+			const byAssistantId = this.slotByAssistantItemId.get(assistantItemId)
+			if (byAssistantId) return byAssistantId
+		}
+		if (responseId) {
+			const byResponseId = this.slotByResponseId.get(responseId)
+			if (byResponseId) return byResponseId
+		}
+		return null
+	}
+
 	private finalizeAssistantForResponse(responseId: string | undefined): void {
 		if (!responseId) return
 		const itemId = this.assistantItemIdByResponseId.get(responseId)
 		if (!itemId) return
+		const slot = this.resolveSlotForAssistantMessage(itemId, responseId)
 		this.emitTranscriptPatch({
 			id: itemId,
 			role: 'assistant',
+			...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 			source: 'response_output_text',
 			status: 'final'
 		})
@@ -303,69 +421,103 @@ export class ChatRealtimeClient {
 		return textPartList.join('\n')
 	}
 
+	private handleInputAudioBufferCommittedEvent(candidate: unknown): void {
+		const event = InputAudioBufferCommittedEventSchema.parse(candidate)
+		const slot = this.createOrGetSlotForUserItem(event.item_id)
+		this.emitTranscriptPatch({
+			id: event.item_id,
+			role: 'user',
+			slotId: slot.slotId,
+			slotOrder: slot.slotOrder,
+			source: 'input_transcription',
+			status: 'streaming'
+		})
+		this.attachQueuedResponsesToUserSlot()
+	}
+
 	private handleConversationItemCreatedEvent(candidate: unknown): void {
 		const event = ConversationItemCreatedEventSchema.parse(candidate)
 		const inputText = this.getInputTextFromConversationItem(event)
 		if (!inputText) return
+		const slot = this.createOrGetSlotForUserItem(event.item.id)
 		this.emitTranscriptPatch({
 			id: event.item.id,
 			replaceText: inputText,
 			role: 'user',
+			slotId: slot.slotId,
+			slotOrder: slot.slotOrder,
 			source: 'input_text',
 			status: 'final'
 		})
+		this.attachQueuedResponsesToUserSlot()
 	}
 
 	private handleInputAudioTranscriptionDeltaEvent(candidate: unknown): void {
 		const event = InputAudioTranscriptionDeltaEventSchema.parse(candidate)
 		if (!event.delta.trim()) return
+		const slot = this.createOrGetSlotForUserItem(event.item_id)
 		this.emitTranscriptPatch({
 			appendText: event.delta,
 			id: event.item_id,
 			role: 'user',
+			slotId: slot.slotId,
+			slotOrder: slot.slotOrder,
 			source: 'input_transcription',
 			status: 'streaming'
 		})
+		this.attachQueuedResponsesToUserSlot()
 	}
 
 	private handleInputAudioTranscriptionCompletedEvent(candidate: unknown): void {
 		const event = InputAudioTranscriptionCompletedEventSchema.parse(candidate)
+		const slot = this.createOrGetSlotForUserItem(event.item_id)
 		this.emitTranscriptPatch({
 			id: event.item_id,
 			replaceText: event.transcript,
 			role: 'user',
+			slotId: slot.slotId,
+			slotOrder: slot.slotOrder,
 			source: 'input_transcription',
 			status: 'final'
 		})
+		this.attachQueuedResponsesToUserSlot()
 	}
 
 	private handleResponseOutputItemAddedEvent(candidate: unknown): void {
 		const event = ResponseOutputItemAddedEventSchema.parse(candidate)
-		if (!event.response_id) return
-		this.assistantItemIdByResponseId.set(event.response_id, event.item.id)
+		const responseId = event.response_id
+		if (!responseId) return
+		this.assistantItemIdByResponseId.set(responseId, event.item.id)
+		this.bindResponseToSlot(responseId)
+		const slot = this.resolveSlotForAssistantMessage(undefined, responseId)
+		if (slot) {
+			this.slotByAssistantItemId.set(event.item.id, slot)
+		}
 
-		const pendingText = this.pendingTextByResponseId.get(event.response_id)
+		const pendingText = this.pendingTextByResponseId.get(responseId)
 		if (pendingText) {
 			this.emitTranscriptPatch({
 				appendText: pendingText,
 				id: event.item.id,
 				role: 'assistant',
+				...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 				source: 'response_output_text',
 				status: 'streaming'
 			})
-			this.pendingTextByResponseId.delete(event.response_id)
+			this.pendingTextByResponseId.delete(responseId)
 		}
 
-		const pendingAudioTranscript = this.pendingAudioTranscriptByResponseId.get(event.response_id)
+		const pendingAudioTranscript = this.pendingAudioTranscriptByResponseId.get(responseId)
 		if (pendingAudioTranscript) {
 			this.emitTranscriptPatch({
 				appendText: pendingAudioTranscript,
 				id: event.item.id,
 				role: 'assistant',
+				...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 				source: 'response_output_audio_transcript',
 				status: 'streaming'
 			})
-			this.pendingAudioTranscriptByResponseId.delete(event.response_id)
+			this.pendingAudioTranscriptByResponseId.delete(responseId)
 		}
 	}
 
@@ -380,10 +532,12 @@ export class ChatRealtimeClient {
 			return
 		}
 		if (!assistantItemId) return
+		const slot = this.resolveSlotForAssistantMessage(assistantItemId, event.response_id)
 		this.emitTranscriptPatch({
 			appendText: event.delta,
 			id: assistantItemId,
 			role: 'assistant',
+			...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 			source: 'response_output_text',
 			status: 'streaming'
 		})
@@ -403,10 +557,12 @@ export class ChatRealtimeClient {
 			return
 		}
 		if (!assistantItemId) return
+		const slot = this.resolveSlotForAssistantMessage(assistantItemId, event.response_id)
 		this.emitTranscriptPatch({
 			appendText: event.delta,
 			id: assistantItemId,
 			role: 'assistant',
+			...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 			source: 'response_output_audio_transcript',
 			status: 'streaming'
 		})
@@ -418,11 +574,13 @@ export class ChatRealtimeClient {
 			event.item_id ??
 			(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
 		if (!assistantItemId) return
+		const slot = this.resolveSlotForAssistantMessage(assistantItemId, event.response_id)
 		if (typeof event.text === 'string' && event.text.trim()) {
 			this.emitTranscriptPatch({
 				id: assistantItemId,
 				replaceText: event.text,
 				role: 'assistant',
+				...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 				source: 'response_output_text',
 				status: 'final'
 			})
@@ -431,6 +589,7 @@ export class ChatRealtimeClient {
 		this.emitTranscriptPatch({
 			id: assistantItemId,
 			role: 'assistant',
+			...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 			source: 'response_output_text',
 			status: 'final'
 		})
@@ -446,14 +605,29 @@ export class ChatRealtimeClient {
 		})
 	}
 
+	private handleResponseCreatedEvent(candidate: unknown): void {
+		const event = ResponseCreatedEventSchema.parse(candidate)
+		const responseId = event.response?.id
+		if (!responseId) return
+		this.bindResponseToSlot(responseId)
+	}
+
 	private handleServerEvent(rawData: unknown): void {
 		try {
 			const candidate = typeof rawData === 'string' ? JSON.parse(rawData) : rawData
 			const baseEvent = RealtimeBaseServerEventSchema.parse(candidate)
 
 			switch (baseEvent.type) {
+				case 'input_audio_buffer.committed': {
+					this.handleInputAudioBufferCommittedEvent(candidate)
+					return
+				}
 				case 'conversation.item.created': {
 					this.handleConversationItemCreatedEvent(candidate)
+					return
+				}
+				case 'response.created': {
+					this.handleResponseCreatedEvent(candidate)
 					return
 				}
 				case 'conversation.item.input_audio_transcription.delta': {
@@ -487,6 +661,9 @@ export class ChatRealtimeClient {
 				}
 				case 'error': {
 					const event = RealtimeErrorEventSchema.parse(candidate)
+					emitChatRealtimeLog('error', 'realtime_error', {
+						message: event.error?.message || 'Realtime session error'
+					})
 					this.callbacks.onError(event.error?.message || 'Realtime session error')
 					return
 				}

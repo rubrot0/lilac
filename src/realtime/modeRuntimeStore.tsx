@@ -97,6 +97,8 @@ const subtitleDedupRoundedTimeWindowMilliseconds = 700
 const draftTranslateDebounceMilliseconds = 300
 const finalTranslateLowConfidenceThreshold = 0.6
 const finalTranslateLowConfidenceDelayMilliseconds = 280
+const finalTranslateSilenceDelayMilliseconds = 1200
+const audioUtteranceReuseThresholdMilliseconds = 1200
 const minimumDraftTextLength = 2
 const minimumDraftTextDeltaLength = 4
 const isTranslateStreamingV2Enabled =
@@ -122,6 +124,17 @@ function normalizeWhitespace(value: string): string {
 	return value.replace(/\s+/g, ' ').trim()
 }
 
+function getChatRoleSortValue(role: 'assistant' | 'user'): number {
+	switch (role) {
+		case 'user':
+			return 0
+		case 'assistant':
+			return 1
+		default:
+			return 2
+	}
+}
+
 function shouldDropSubtitleText(value: string): boolean {
 	const normalizedValue = normalizeWhitespace(value).toLowerCase()
 	if (!normalizedValue) return true
@@ -131,6 +144,20 @@ function shouldDropSubtitleText(value: string): boolean {
 	if (normalizedValue === 'context') return true
 	if (normalizedValue === 'context:') return true
 	return false
+}
+
+function mergeUtteranceText(existingText: string, nextChunkText: string): string {
+	const normalizedExistingText = normalizeWhitespace(existingText)
+	const normalizedChunkText = normalizeWhitespace(nextChunkText)
+	if (!normalizedChunkText) return normalizedExistingText
+	if (!normalizedExistingText) return normalizedChunkText
+	if (normalizedExistingText.toLowerCase().endsWith(normalizedChunkText.toLowerCase())) {
+		return normalizedExistingText
+	}
+	if (normalizedChunkText.toLowerCase().startsWith(normalizedExistingText.toLowerCase())) {
+		return normalizedChunkText
+	}
+	return `${normalizedExistingText} ${normalizedChunkText}`
 }
 
 function sanitizeTranslateSettings(input: Partial<TranslateSettings> | null): TranslateSettings {
@@ -223,19 +250,46 @@ function upsertChatTranscript(
 			? patch.replaceText
 			: `${existingItem?.text ?? ''}${patch.appendText ?? ''}`
 
+	const slotOrder =
+		typeof patch.slotOrder === 'number'
+			? patch.slotOrder
+			: typeof existingItem?.slotOrder === 'number'
+				? existingItem.slotOrder
+				: undefined
+	const slotId =
+		typeof patch.slotId === 'string'
+			? patch.slotId
+			: typeof existingItem?.slotId === 'string'
+				? existingItem.slotId
+				: undefined
+	const roleSortValue = getChatRoleSortValue(patch.role)
+	const slotBasedSequence =
+		typeof slotOrder === 'number' ? slotOrder * 10 + roleSortValue : undefined
 	const nextItem: ChatTranscriptMessage = {
-		clientSequence: existingItem?.clientSequence ?? nextSequenceNumber,
+		clientSequence:
+			existingItem?.clientSequence ??
+			(typeof slotBasedSequence === 'number' ? slotBasedSequence : nextSequenceNumber),
 		createdAt: existingItem?.createdAt ?? Date.now(),
 		id: patch.id,
 		role: patch.role,
+		...(typeof slotId === 'string' ? { slotId } : {}),
+		...(typeof slotOrder === 'number' ? { slotOrder } : {}),
 		source: patch.source,
 		status: patch.status ?? existingItem?.status ?? 'streaming',
 		text: updatedText
 	}
 
+	if (typeof slotBasedSequence === 'number' && nextItem.clientSequence !== slotBasedSequence) {
+		nextItem.clientSequence = slotBasedSequence
+	}
+
 	if (existingIndex === -1) {
 		const nextList = [...existingList, nextItem].sort(
-			(left, right) => left.clientSequence - right.clientSequence || left.createdAt - right.createdAt
+			(left, right) =>
+				(left.slotOrder ?? Number.MAX_SAFE_INTEGER) - (right.slotOrder ?? Number.MAX_SAFE_INTEGER) ||
+				getChatRoleSortValue(left.role) - getChatRoleSortValue(right.role) ||
+				left.clientSequence - right.clientSequence ||
+				left.createdAt - right.createdAt
 		)
 		return {
 			list: nextList,
@@ -246,7 +300,11 @@ function upsertChatTranscript(
 	const nextList = existingList.slice()
 	nextList[existingIndex] = nextItem
 	nextList.sort(
-		(left, right) => left.clientSequence - right.clientSequence || left.createdAt - right.createdAt
+		(left, right) =>
+			(left.slotOrder ?? Number.MAX_SAFE_INTEGER) - (right.slotOrder ?? Number.MAX_SAFE_INTEGER) ||
+			getChatRoleSortValue(left.role) - getChatRoleSortValue(right.role) ||
+			left.clientSequence - right.clientSequence ||
+			left.createdAt - right.createdAt
 	)
 	return {
 		list: nextList,
@@ -439,6 +497,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		useState<ChannelConnectionState>('disconnected')
 	const [subtitleChannelState, setSubtitleChannelState] =
 		useState<ChannelConnectionState>('disconnected')
+	const [isOnline, setIsOnline] = useState(true)
 	const [isHydrated, setIsHydrated] = useState(false)
 
 	const chatClientRef = useRef<ChatRealtimeClient | null>(null)
@@ -457,10 +516,15 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	const pendingTranslateInputQueueRef = useRef<PendingTranslateInput[]>([])
 	const chatTranscriptSequenceRef = useRef(1)
 	const subtitleDedupKeyTimestampByKeyRef = useRef<Map<string, number>>(new Map())
+	const subtitleSegmentTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const subtitleSourceTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const subtitlePreviousItemIdByItemIdRef = useRef<Map<string, null | string>>(new Map())
+	const subtitleUtteranceIdBySegmentItemIdRef = useRef<Map<string, string>>(new Map())
+	const subtitlePreviousUtteranceIdByUtteranceIdRef = useRef<Map<string, null | string>>(new Map())
 	const subtitleLatestConfidenceByItemIdRef = useRef<Map<string, number>>(new Map())
 	const subtitleCommittedAtByItemIdRef = useRef<Map<string, number>>(new Map())
+	const activeAudioUtteranceRef = useRef<null | { id: string; updatedAt: number }>(null)
+	const lastAudioUtteranceIdRef = useRef<null | string>(null)
 	const translateDraftSequenceByItemIdRef = useRef<Map<string, number>>(new Map())
 	const translateLastDraftSourceTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const translateDraftScheduleTimerByItemIdRef = useRef<Map<string, number>>(new Map())
@@ -537,10 +601,15 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		void subtitleClientRef.current?.stop()
 		subtitleClientRef.current = null
 		clearAllTranslateStreamingTimers()
+		subtitleSegmentTextByItemIdRef.current.clear()
 		subtitleSourceTextByItemIdRef.current.clear()
 		subtitlePreviousItemIdByItemIdRef.current.clear()
+		subtitleUtteranceIdBySegmentItemIdRef.current.clear()
+		subtitlePreviousUtteranceIdByUtteranceIdRef.current.clear()
 		subtitleLatestConfidenceByItemIdRef.current.clear()
 		subtitleCommittedAtByItemIdRef.current.clear()
+		activeAudioUtteranceRef.current = null
+		lastAudioUtteranceIdRef.current = null
 		translateDraftSequenceByItemIdRef.current.clear()
 		translateLastDraftSourceTextByItemIdRef.current.clear()
 		setSubtitleChannelState('disconnected')
@@ -568,10 +637,15 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		setTranslateCards([])
 		setLiveSubtitleState(defaultLiveSubtitleState)
 		subtitleDedupKeyTimestampByKeyRef.current.clear()
+		subtitleSegmentTextByItemIdRef.current.clear()
 		subtitleSourceTextByItemIdRef.current.clear()
 		subtitlePreviousItemIdByItemIdRef.current.clear()
+		subtitleUtteranceIdBySegmentItemIdRef.current.clear()
+		subtitlePreviousUtteranceIdByUtteranceIdRef.current.clear()
 		subtitleLatestConfidenceByItemIdRef.current.clear()
 		subtitleCommittedAtByItemIdRef.current.clear()
+		activeAudioUtteranceRef.current = null
+		lastAudioUtteranceIdRef.current = null
 		translateDraftSequenceByItemIdRef.current.clear()
 		translateLastDraftSourceTextByItemIdRef.current.clear()
 		translateUtteranceSequenceRef.current = 1
@@ -637,6 +711,55 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			flushPendingTranslateInputs()
 		},
 		[flushPendingTranslateInputs]
+	)
+
+	const resolveAudioUtterance = useCallback(
+		(
+			segmentItemId: string,
+			previousSegmentItemId?: null | string
+		): { id: string; previousId: null | string } => {
+			const existingUtteranceId = subtitleUtteranceIdBySegmentItemIdRef.current.get(segmentItemId)
+			if (existingUtteranceId) {
+				return {
+					id: existingUtteranceId,
+					previousId:
+						subtitlePreviousUtteranceIdByUtteranceIdRef.current.get(existingUtteranceId) ?? null
+				}
+			}
+
+			const now = Date.now()
+			const activeUtterance = activeAudioUtteranceRef.current
+			const mappedPreviousUtteranceId = previousSegmentItemId
+				? (subtitleUtteranceIdBySegmentItemIdRef.current.get(previousSegmentItemId) ?? null)
+				: null
+			const shouldReuseActiveUtterance =
+				activeUtterance !== null &&
+				now - activeUtterance.updatedAt <= audioUtteranceReuseThresholdMilliseconds &&
+				(!mappedPreviousUtteranceId || mappedPreviousUtteranceId === activeUtterance.id)
+
+			if (shouldReuseActiveUtterance && activeUtterance) {
+				subtitleUtteranceIdBySegmentItemIdRef.current.set(segmentItemId, activeUtterance.id)
+				return {
+					id: activeUtterance.id,
+					previousId: subtitlePreviousUtteranceIdByUtteranceIdRef.current.get(activeUtterance.id) ?? null
+				}
+			}
+
+			const utteranceId = createClientItemId('audio_utterance')
+			const previousUtteranceId = mappedPreviousUtteranceId ?? lastAudioUtteranceIdRef.current ?? null
+			subtitleUtteranceIdBySegmentItemIdRef.current.set(segmentItemId, utteranceId)
+			subtitlePreviousUtteranceIdByUtteranceIdRef.current.set(utteranceId, previousUtteranceId)
+			lastAudioUtteranceIdRef.current = utteranceId
+			activeAudioUtteranceRef.current = {
+				id: utteranceId,
+				updatedAt: now
+			}
+			return {
+				id: utteranceId,
+				previousId: previousUtteranceId
+			}
+		},
+		[]
 	)
 
 	const upsertSubtitleCard = useCallback(
@@ -723,10 +846,11 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		(itemId: string, inputOrigin: 'audio' | 'text') => {
 			clearTranslateFinalTimerByItemId(itemId)
 			const confidence = subtitleLatestConfidenceByItemIdRef.current.get(itemId)
-			const delayMilliseconds =
+			const lowConfidenceDelayMilliseconds =
 				typeof confidence === 'number' && confidence < finalTranslateLowConfidenceThreshold
 					? finalTranslateLowConfidenceDelayMilliseconds
 					: 0
+			const delayMilliseconds = finalTranslateSilenceDelayMilliseconds + lowConfidenceDelayMilliseconds
 			const timerId = window.setTimeout(() => {
 				translateFinalScheduleTimerByItemIdRef.current.delete(itemId)
 				const latestSourceText = normalizeWhitespace(
@@ -765,24 +889,41 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				if (now - value > 10_000) subtitleDedupKeyTimestampByKeyRef.current.delete(key)
 			})
 
-			subtitleSourceTextByItemIdRef.current.set(patch.itemId, normalizedText)
-			subtitlePreviousItemIdByItemIdRef.current.set(patch.itemId, patch.previousItemId ?? null)
-			subtitleCommittedAtByItemIdRef.current.set(patch.itemId, patch.committedAt)
+			const resolvedUtterance = resolveAudioUtterance(patch.itemId, patch.previousItemId)
+			const mergedSourceText = mergeUtteranceText(
+				subtitleSourceTextByItemIdRef.current.get(resolvedUtterance.id) ?? '',
+				normalizedText
+			)
+			subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
+			subtitleSourceTextByItemIdRef.current.set(resolvedUtterance.id, mergedSourceText)
+			subtitlePreviousItemIdByItemIdRef.current.set(resolvedUtterance.id, resolvedUtterance.previousId)
+			subtitleCommittedAtByItemIdRef.current.set(resolvedUtterance.id, patch.committedAt)
 			if (typeof patch.confidence === 'number') {
-				subtitleLatestConfidenceByItemIdRef.current.set(patch.itemId, patch.confidence)
+				subtitleLatestConfidenceByItemIdRef.current.set(resolvedUtterance.id, patch.confidence)
+			}
+			activeAudioUtteranceRef.current = {
+				id: resolvedUtterance.id,
+				updatedAt: now
 			}
 
-			clearTranslateDraftTimerByItemId(patch.itemId)
-			upsertSubtitleCard(patch.itemId, patch.previousItemId, normalizedText)
+			clearTranslateDraftTimerByItemId(resolvedUtterance.id)
+			upsertSubtitleCard(resolvedUtterance.id, resolvedUtterance.previousId, mergedSourceText)
 			setLiveSubtitleState(previousState => ({
 				...previousState,
-				activeSegmentId: patch.itemId,
-				text: normalizedText,
+				activeSegmentId: resolvedUtterance.id,
+				text: '',
 				updatedAt: Date.now()
 			}))
-			scheduleFinalTranslateForItem(patch.itemId, 'audio')
+			scheduleDraftTranslateForItem(resolvedUtterance.id, 'audio')
+			scheduleFinalTranslateForItem(resolvedUtterance.id, 'audio')
 		},
-		[clearTranslateDraftTimerByItemId, scheduleFinalTranslateForItem, upsertSubtitleCard]
+		[
+			clearTranslateDraftTimerByItemId,
+			resolveAudioUtterance,
+			scheduleDraftTranslateForItem,
+			scheduleFinalTranslateForItem,
+			upsertSubtitleCard
+		]
 	)
 
 	const startChatClient = useCallback(() => {
@@ -897,10 +1038,14 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				clearTranslateFinalTimerByItemId(patch.itemId)
 				subtitleSourceTextByItemIdRef.current.delete(patch.itemId)
 				subtitlePreviousItemIdByItemIdRef.current.delete(patch.itemId)
+				subtitlePreviousUtteranceIdByUtteranceIdRef.current.delete(patch.itemId)
 				subtitleLatestConfidenceByItemIdRef.current.delete(patch.itemId)
 				subtitleCommittedAtByItemIdRef.current.delete(patch.itemId)
 				translateDraftSequenceByItemIdRef.current.delete(patch.itemId)
 				translateLastDraftSourceTextByItemIdRef.current.delete(patch.itemId)
+				if (activeAudioUtteranceRef.current?.id === patch.itemId) {
+					activeAudioUtteranceRef.current = null
+				}
 				setTranslateCards(previousCards => {
 					const hasExistingCard = previousCards.some(card => card.id === patch.itemId)
 					const nextCards = applyTranslateResultPatch(
@@ -965,27 +1110,42 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				}))
 			},
 			onSubtitleDelta: patch => {
-				const previousText = subtitleSourceTextByItemIdRef.current.get(patch.itemId) ?? ''
-				const nextText = `${previousText}${patch.textDelta}`
-				if (shouldDropSubtitleText(nextText)) {
-					setLiveSubtitleState({
+				const nextSegmentText = `${subtitleSegmentTextByItemIdRef.current.get(patch.itemId) ?? ''}${patch.textDelta}`
+				const normalizedSegmentText = normalizeWhitespace(nextSegmentText)
+				subtitleSegmentTextByItemIdRef.current.set(patch.itemId, nextSegmentText)
+				if (shouldDropSubtitleText(normalizedSegmentText)) {
+					setLiveSubtitleState(previousState => ({
+						...previousState,
 						activeSegmentId: patch.itemId,
 						isListening: true,
 						text: '',
 						updatedAt: Date.now()
-					})
+					}))
 					return
 				}
-				subtitleSourceTextByItemIdRef.current.set(patch.itemId, nextText)
-				subtitlePreviousItemIdByItemIdRef.current.set(patch.itemId, patch.previousItemId ?? null)
-				upsertSubtitleCard(patch.itemId, patch.previousItemId, nextText)
+				const resolvedUtterance = resolveAudioUtterance(patch.itemId, patch.previousItemId)
+				const mergedSourceText = mergeUtteranceText(
+					subtitleSourceTextByItemIdRef.current.get(resolvedUtterance.id) ?? '',
+					patch.textDelta
+				)
+				subtitleSourceTextByItemIdRef.current.set(resolvedUtterance.id, mergedSourceText)
+				subtitlePreviousItemIdByItemIdRef.current.set(
+					resolvedUtterance.id,
+					resolvedUtterance.previousId
+				)
+				activeAudioUtteranceRef.current = {
+					id: resolvedUtterance.id,
+					updatedAt: Date.now()
+				}
+				upsertSubtitleCard(resolvedUtterance.id, resolvedUtterance.previousId, mergedSourceText)
 				setLiveSubtitleState({
-					activeSegmentId: patch.itemId,
+					activeSegmentId: resolvedUtterance.id,
 					isListening: true,
-					text: nextText,
+					text: '',
 					updatedAt: Date.now()
 				})
-				scheduleDraftTranslateForItem(patch.itemId, 'audio')
+				scheduleDraftTranslateForItem(resolvedUtterance.id, 'audio')
+				scheduleFinalTranslateForItem(resolvedUtterance.id, 'audio')
 			},
 			onSubtitleFinal: handleTranslateSubtitleFinalPatch
 		})
@@ -998,7 +1158,9 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	}, [
 		clearReconnectTimer,
 		handleTranslateSubtitleFinalPatch,
+		resolveAudioUtterance,
 		scheduleDraftTranslateForItem,
+		scheduleFinalTranslateForItem,
 		stopSubtitleClient,
 		upsertSubtitleCard
 	])
@@ -1115,10 +1277,15 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		(nextSettings: TranslateSettings) => {
 			const sanitizedSettings = sanitizeTranslateSettings(nextSettings)
 			clearAllTranslateStreamingTimers()
+			subtitleSegmentTextByItemIdRef.current.clear()
 			subtitleSourceTextByItemIdRef.current.clear()
 			subtitlePreviousItemIdByItemIdRef.current.clear()
+			subtitleUtteranceIdBySegmentItemIdRef.current.clear()
+			subtitlePreviousUtteranceIdByUtteranceIdRef.current.clear()
 			subtitleLatestConfidenceByItemIdRef.current.clear()
 			subtitleCommittedAtByItemIdRef.current.clear()
+			activeAudioUtteranceRef.current = null
+			lastAudioUtteranceIdRef.current = null
 			translateDraftSequenceByItemIdRef.current.clear()
 			translateLastDraftSourceTextByItemIdRef.current.clear()
 			pendingTranslateInputQueueRef.current = []
@@ -1352,6 +1519,8 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 
 		function handleOnline(): void {
 			isOnlineRef.current = true
+			setIsOnline(true)
+			setStatusMessage(null)
 			if (modeRef.current === 'chat' && chatChannelState !== 'connected') {
 				scheduleReconnect('chat')
 			}
@@ -1363,6 +1532,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 
 		function handleOffline(): void {
 			isOnlineRef.current = false
+			setIsOnline(false)
 			if (typeof reconnectStatusTimerRef.current === 'number') {
 				window.clearTimeout(reconnectStatusTimerRef.current)
 				reconnectStatusTimerRef.current = null
@@ -1371,6 +1541,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		}
 
 		isOnlineRef.current = navigator.onLine
+		setIsOnline(navigator.onLine)
 		window.addEventListener('online', handleOnline)
 		window.addEventListener('offline', handleOffline)
 		return () => {
@@ -1419,7 +1590,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 
 	useEffect(() => {
 		if (!isHydrated) return
-		const isOffline = !isOnlineRef.current
+		const isOffline = !isOnline
 		if (isOffline) {
 			setStatusMessage('Offline. Waiting for network…')
 			return
@@ -1455,7 +1626,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			window.clearTimeout(reconnectStatusTimerRef.current)
 			reconnectStatusTimerRef.current = null
 		}
-	}, [chatChannelState, isHydrated, mode, subtitleChannelState, translateChannelState])
+	}, [chatChannelState, isHydrated, isOnline, mode, subtitleChannelState, translateChannelState])
 
 	useEffect(() => {
 		if (!isHydrated) return

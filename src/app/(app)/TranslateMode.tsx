@@ -221,7 +221,6 @@ function LanguagePickerContent({
 export default function TranslateMode() {
 	const {
 		getDirectionColor,
-		liveSubtitleState,
 		setTranslateSettings,
 		submitTranslateTextInput,
 		translateCards,
@@ -385,22 +384,6 @@ export default function TranslateMode() {
 				className="min-h-0 flex-1 rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card)]"
 			>
 				<div className="flex flex-col gap-3 p-3 sm:p-4">
-					<div className="px-1 py-1" data-testid="translate-live-subtitle-rail" aria-live="polite">
-						<div className="flex items-center gap-2 font-semibold text-[10px] text-[var(--lilac-ink-muted)] uppercase tracking-[0.14em]">
-							<span
-								className={`inline-flex h-2 w-2 rounded-full ${
-									liveSubtitleState.isListening
-										? 'animate-pulse bg-[var(--lilac-direction-secondary)]'
-										: 'bg-[var(--lilac-border-strong)]'
-								}`}
-							/>
-							{liveSubtitleState.isListening ? 'Listening' : 'Ready'}
-						</div>
-						<p className="min-h-6 whitespace-pre-wrap break-words pt-1 text-[var(--lilac-ink)] text-sm">
-							{liveSubtitleState.text || 'Live subtitles appear here while people speak.'}
-						</p>
-					</div>
-
 					{translateCards.length ? (
 						translateCards.map(card => {
 							const routeLabel = `${resolveLanguageLabel(card.sourceLanguageCode)} → ${resolveLanguageLabel(
@@ -422,11 +405,11 @@ export default function TranslateMode() {
 									key={card.id}
 									data-testid={`translate-card-${card.id}`}
 									data-render-state={card.renderState}
-									className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] px-3 py-2.5"
+									className="rounded-xl border border-[var(--lilac-border)] bg-[var(--lilac-card-muted)] px-3 py-2"
 								>
-									<div className="mb-1 flex items-center justify-between gap-2">
+									<div className="mb-0.5 flex items-center justify-between gap-2">
 										<p
-											className="font-semibold text-[0.78rem] tracking-[0.03em]"
+											className="font-semibold text-[0.74rem] tracking-[0.03em]"
 											style={{ color: getDirectionColor(card.direction) }}
 										>
 											{routeLabel}
@@ -447,10 +430,9 @@ export default function TranslateMode() {
 										{translationText}
 									</p>
 									<p
-										className="mt-1 whitespace-pre-wrap break-words text-[0.78rem] text-[var(--lilac-ink-muted)] leading-relaxed"
+										className="mt-0.5 whitespace-pre-wrap break-words text-[0.78rem] text-[var(--lilac-ink-muted)] leading-relaxed"
 										data-testid={`translate-card-source-${card.id}`}
 									>
-										<span className="mr-1 font-semibold text-[10px] uppercase tracking-[0.12em]">Heard:</span>
 										{card.sourceText.trim() || '…'}
 									</p>
 								</article>

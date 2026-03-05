@@ -154,6 +154,10 @@ export const SystemLeakTextSchema = z
 		'likely conversation languages',
 		'keep proper nouns',
 		'preserve punctuation',
+		'preserve speaker intent',
+		'translate to language code',
+		'i speak language code',
+		'always call publish_translation',
 		'no summaries',
 		'no commentary'
 	])

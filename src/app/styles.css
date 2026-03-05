@@ -18,8 +18,8 @@
 	--lilac-brand-primary-foreground: #f9f5ec;
 	--lilac-direction-primary: #5f43be;
 	--lilac-direction-secondary: #2f6dd8;
-	--lilac-button-disabled-bg: color-mix(in oklab, var(--lilac-brand-primary) 46%, white 54%);
-	--lilac-button-disabled-fg: color-mix(in oklab, white 90%, var(--lilac-brand-primary) 10%);
+	--lilac-button-disabled-bg: #8f9ab3;
+	--lilac-button-disabled-fg: #f7fbff;
 
 	--background: var(--lilac-surface);
 	--foreground: var(--lilac-ink);
@@ -69,8 +69,8 @@
 		--lilac-brand-primary-foreground: #f8f4ff;
 		--lilac-direction-primary: #a996ff;
 		--lilac-direction-secondary: #8cc2ff;
-		--lilac-button-disabled-bg: color-mix(in oklab, #392d53 76%, #6652a8 24%);
-		--lilac-button-disabled-fg: color-mix(in oklab, #efe9ff 92%, #c7b7ef 8%);
+		--lilac-button-disabled-bg: #4a4f66;
+		--lilac-button-disabled-fg: #e8ecff;
 
 		--background: var(--lilac-surface);
 		--foreground: var(--lilac-ink);

@@ -70,6 +70,8 @@ export async function collectRuntimeErrorMatches(runtimeLogPath: string): Promis
 		/Unsupported value/i,
 		/Unknown parameter/i,
 		/Invalid 'item\.id'/i,
+		/buffer too small/i,
+		/Draft translation timed out/i,
 		/Unhandled/i,
 		/An error occurred in the Server Components render/i,
 		/\bdigest\b/i

@@ -43,6 +43,14 @@ export type ConnectionHealthState = {
 	translateConnected: boolean
 }
 
+export type ConnectionUiState = {
+	isLive: boolean
+	isOffline: boolean
+	isReconnecting: boolean
+	lastHealthyAt: null | number
+	statusMessage: null | string
+}
+
 export type UtteranceDirection = 'my_to_target' | 'target_to_my'
 
 export type UtteranceStatus = 'streaming' | 'translating' | 'draft' | 'final' | 'error'
@@ -80,9 +88,28 @@ export type ChatTranscriptStatus = 'streaming' | 'final'
 export type ChatTranscriptMessage = {
 	clientSequence: number
 	id: string
+	slotId?: string
+	slotOrder?: number
 	role: 'user' | 'assistant'
 	text: string
 	status: ChatTranscriptStatus
 	source: ChatTranscriptSource
 	createdAt: number
+}
+
+export type ChatTurnSlot = {
+	slotId: string
+	orderKey: number
+	state: 'pending_user' | 'pending_assistant' | 'completed'
+	userItemId: string
+	assistantItemId?: string
+}
+
+export type ChatTimelineItem = {
+	slotId: string
+	clientSequence: number
+	createdAt: number
+	role: 'user' | 'assistant'
+	streamState: ChatTranscriptStatus
+	text: string
 }
