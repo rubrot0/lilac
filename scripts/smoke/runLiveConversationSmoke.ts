@@ -224,6 +224,9 @@ async function runChatScenario(page: Page, artifactDirectoryPath: string): Promi
 		}
 
 		await closeOverlayIfPresent(page)
+		const assistantRowCountBeforeTypedSend = await page
+			.locator('[data-testid^="chat-row-"][data-chat-role="assistant"]')
+			.count()
 		await page.getByTestId('chat-text-input').fill(typedMessage)
 		await page.getByTestId('chat-text-send').click()
 
@@ -240,11 +243,11 @@ async function runChatScenario(page: Page, artifactDirectoryPath: string): Promi
 		)
 
 		await waitForCondition(
-			async function hasAssistantMessage(): Promise<boolean> {
-				const messageTextList = await page
-					.locator('[data-testid^="chat-message-text-"]')
-					.allInnerTexts()
-				return messageTextList.some(messageText => !messageText.includes(typedMessage))
+			async function hasNewAssistantMessage(): Promise<boolean> {
+				const assistantRowCountAfterTypedSend = await page
+					.locator('[data-testid^="chat-row-"][data-chat-role="assistant"]')
+					.count()
+				return assistantRowCountAfterTypedSend > assistantRowCountBeforeTypedSend
 			},
 			35_000,
 			'Chat mode did not produce a follow-up assistant transcript.'
