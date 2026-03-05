@@ -62,8 +62,7 @@ export const CreateTranslateRealtimeClientSecretActionOutputSchema = z.object({
 export const CreateRealtimeTranscriptionSessionActionInputSchema = z.object({
 	asrProfile: TranscriptionAsrProfileSchema.default(defaultTranscriptionAsrProfile),
 	myLanguageCode: LanguageCodeSchema,
-	translateToLanguageCode: LanguageCodeSchema,
-	turnEagerness: z.enum(['low', 'medium', 'high']).default('high')
+	translateToLanguageCode: LanguageCodeSchema
 })
 
 export const CreateRealtimeTranscriptionSessionActionOutputSchema = z.object({
@@ -158,6 +157,9 @@ export const SystemLeakTextSchema = z
 		'translate to language code',
 		'i speak language code',
 		'always call publish_translation',
+		'transcribe spoken words only',
+		'do not add labels',
+		'metadata or context notes',
 		'no summaries',
 		'no commentary'
 	])

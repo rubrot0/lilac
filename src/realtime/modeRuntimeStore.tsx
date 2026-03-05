@@ -106,6 +106,13 @@ const isTranslateStreamingV2Enabled =
 const systemLeakMatcherList = SystemLeakTextSchema.parse(undefined).map(matcher =>
 	matcher.toLowerCase()
 )
+const systemLeakPatternList = [
+	/\btrans\s*cribe\s+spoken\s+words\s+only\b/i,
+	/\bdo\s+not\s+add\s+labels\b/i,
+	/\bmetadata\s*,?\s*or\s+context\s+notes\b/i,
+	/\bpreserve\s+punctuation\s+and\s+proper\s+nouns\b/i,
+	/\blike?ly\s+conversation\s+languages\b/i
+]
 
 function normalizeTurnDelaySeconds(value: unknown): number {
 	const parsedValue = typeof value === 'number' ? value : Number.parseFloat(String(value))
@@ -122,6 +129,54 @@ function parseStoredBoolean(value: null | string, fallbackValue: boolean): boole
 
 function normalizeWhitespace(value: string): string {
 	return value.replace(/\s+/g, ' ').trim()
+}
+
+function isAsciiDigitCharacter(value: string): boolean {
+	return value >= '0' && value <= '9'
+}
+
+function isUnicodeLetterCharacter(value: string): boolean {
+	return value.toLowerCase() !== value.toUpperCase()
+}
+
+function canonicalizeTranscriptionText(value: string): string {
+	const punctuationNormalizedValue = normalizeWhitespace(value)
+		.toLowerCase()
+		.replace(/\s+([,.;!?])/g, '$1')
+	let canonicalValue = ''
+	for (const character of punctuationNormalizedValue) {
+		if (isAsciiDigitCharacter(character) || isUnicodeLetterCharacter(character)) {
+			canonicalValue += character
+		}
+	}
+	return canonicalValue
+}
+
+function splitSentenceList(value: string): string[] {
+	return value
+		.split(/(?<=[.!?])\s+/)
+		.map(sentence => normalizeWhitespace(sentence))
+		.filter(Boolean)
+}
+
+function isEquivalentTranscriptionChunk(leftValue: string, rightValue: string): boolean {
+	const normalizedLeftValue = canonicalizeTranscriptionText(leftValue)
+	const normalizedRightValue = canonicalizeTranscriptionText(rightValue)
+	if (!normalizedLeftValue || !normalizedRightValue) return false
+	if (normalizedLeftValue === normalizedRightValue) return true
+	if (
+		normalizedLeftValue.includes(normalizedRightValue) &&
+		normalizedRightValue.length >= Math.floor(normalizedLeftValue.length * 0.7)
+	) {
+		return true
+	}
+	if (
+		normalizedRightValue.includes(normalizedLeftValue) &&
+		normalizedLeftValue.length >= Math.floor(normalizedRightValue.length * 0.7)
+	) {
+		return true
+	}
+	return false
 }
 
 function getChatRoleSortValue(role: 'assistant' | 'user'): number {
@@ -141,9 +196,46 @@ function shouldDropSubtitleText(value: string): boolean {
 	for (const matcher of systemLeakMatcherList) {
 		if (normalizedValue.includes(matcher)) return true
 	}
+	for (const pattern of systemLeakPatternList) {
+		if (pattern.test(normalizedValue)) return true
+	}
+	const collapsedValue = canonicalizeTranscriptionText(normalizedValue)
+	if (collapsedValue.includes('transcribespokenwordsonly')) return true
+	if (collapsedValue.includes('donotaddlabels')) return true
+	if (collapsedValue.includes('metadataorcontextnotes')) return true
 	if (normalizedValue === 'context') return true
 	if (normalizedValue === 'context:') return true
 	return false
+}
+
+function sanitizeSubtitleText(value: string): string {
+	const normalizedValue = normalizeWhitespace(value)
+	if (!normalizedValue) return ''
+	const sentenceList = splitSentenceList(normalizedValue)
+	if (sentenceList.length === 0) {
+		return shouldDropSubtitleText(normalizedValue) ? '' : normalizedValue
+	}
+	const filteredSentenceList: string[] = []
+	for (const sentence of sentenceList) {
+		if (shouldDropSubtitleText(sentence)) continue
+		const previousSentence = filteredSentenceList[filteredSentenceList.length - 1]
+		if (previousSentence && isEquivalentTranscriptionChunk(previousSentence, sentence)) continue
+		filteredSentenceList.push(sentence)
+	}
+	if (filteredSentenceList.length === 0) return ''
+	return normalizeWhitespace(filteredSentenceList.join(' '))
+}
+
+function findWordOverlapLength(existingText: string, nextText: string): number {
+	const existingWordList = existingText.split(' ')
+	const nextWordList = nextText.split(' ')
+	const maxOverlapLength = Math.min(existingWordList.length, nextWordList.length)
+	for (let overlapLength = maxOverlapLength; overlapLength >= 1; overlapLength -= 1) {
+		const existingSuffix = existingWordList.slice(-overlapLength).join(' ').toLowerCase()
+		const nextPrefix = nextWordList.slice(0, overlapLength).join(' ').toLowerCase()
+		if (existingSuffix === nextPrefix) return overlapLength
+	}
+	return 0
 }
 
 function mergeUtteranceText(existingText: string, nextChunkText: string): string {
@@ -151,11 +243,21 @@ function mergeUtteranceText(existingText: string, nextChunkText: string): string
 	const normalizedChunkText = normalizeWhitespace(nextChunkText)
 	if (!normalizedChunkText) return normalizedExistingText
 	if (!normalizedExistingText) return normalizedChunkText
+	if (isEquivalentTranscriptionChunk(normalizedExistingText, normalizedChunkText)) {
+		return normalizedExistingText
+	}
 	if (normalizedExistingText.toLowerCase().endsWith(normalizedChunkText.toLowerCase())) {
 		return normalizedExistingText
 	}
 	if (normalizedChunkText.toLowerCase().startsWith(normalizedExistingText.toLowerCase())) {
 		return normalizedChunkText
+	}
+	const overlapLength = findWordOverlapLength(normalizedExistingText, normalizedChunkText)
+	if (overlapLength > 0) {
+		const chunkWordList = normalizedChunkText.split(' ')
+		const suffixWordList = chunkWordList.slice(overlapLength)
+		if (suffixWordList.length === 0) return normalizedExistingText
+		return `${normalizedExistingText} ${suffixWordList.join(' ')}`
 	}
 	return `${normalizedExistingText} ${normalizedChunkText}`
 }
@@ -516,6 +618,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	const pendingTranslateInputQueueRef = useRef<PendingTranslateInput[]>([])
 	const chatTranscriptSequenceRef = useRef(1)
 	const subtitleDedupKeyTimestampByKeyRef = useRef<Map<string, number>>(new Map())
+	const subtitleRawSegmentTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const subtitleSegmentTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const subtitleSourceTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const subtitlePreviousItemIdByItemIdRef = useRef<Map<string, null | string>>(new Map())
@@ -605,6 +708,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		void subtitleClientRef.current?.stop()
 		subtitleClientRef.current = null
 		clearAllTranslateStreamingTimers()
+		subtitleRawSegmentTextByItemIdRef.current.clear()
 		subtitleSegmentTextByItemIdRef.current.clear()
 		subtitleSourceTextByItemIdRef.current.clear()
 		subtitlePreviousItemIdByItemIdRef.current.clear()
@@ -641,6 +745,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		setTranslateCards([])
 		setLiveSubtitleState(defaultLiveSubtitleState)
 		subtitleDedupKeyTimestampByKeyRef.current.clear()
+		subtitleRawSegmentTextByItemIdRef.current.clear()
 		subtitleSegmentTextByItemIdRef.current.clear()
 		subtitleSourceTextByItemIdRef.current.clear()
 		subtitlePreviousItemIdByItemIdRef.current.clear()
@@ -875,17 +980,22 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 
 	const handleTranslateSubtitleFinalPatch = useCallback(
 		(patch: SubtitleFinalPatch) => {
-			const normalizedText = normalizeWhitespace(patch.text)
-			if (!normalizedText) return
-			if (shouldDropSubtitleText(normalizedText)) return
+			const normalizedText = sanitizeSubtitleText(patch.text)
+			subtitleRawSegmentTextByItemIdRef.current.delete(patch.itemId)
+			if (!normalizedText) {
+				subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
+				return
+			}
 
 			const now = Date.now()
 			const roundedTimestamp =
 				Math.round(now / subtitleDedupRoundedTimeWindowMilliseconds) *
 				subtitleDedupRoundedTimeWindowMilliseconds
-			const dedupeKey = `${normalizedText.toLowerCase()}::${roundedTimestamp}::${translateSettingsRef.current.myLanguageCode}`
+			const canonicalText = canonicalizeTranscriptionText(normalizedText)
+			const dedupeKey = `${canonicalText}::${roundedTimestamp}::${translateSettingsRef.current.myLanguageCode}`
 			const previousTimestamp = subtitleDedupKeyTimestampByKeyRef.current.get(dedupeKey)
 			if (typeof previousTimestamp === 'number' && now - previousTimestamp < 2500) {
+				subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
 				return
 			}
 			subtitleDedupKeyTimestampByKeyRef.current.set(dedupeKey, now)
@@ -894,10 +1004,15 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			})
 
 			const resolvedUtterance = resolveAudioUtterance(patch.itemId, patch.previousItemId)
-			const mergedSourceText = mergeUtteranceText(
-				subtitleSourceTextByItemIdRef.current.get(resolvedUtterance.id) ?? '',
-				normalizedText
-			)
+			const existingSourceText = subtitleSourceTextByItemIdRef.current.get(resolvedUtterance.id) ?? ''
+			const segmentText = subtitleSegmentTextByItemIdRef.current.get(patch.itemId) ?? ''
+			const shouldMergeFinalText =
+				!existingSourceText ||
+				!segmentText ||
+				!isEquivalentTranscriptionChunk(segmentText, normalizedText)
+			const mergedSourceText = shouldMergeFinalText
+				? mergeUtteranceText(existingSourceText, normalizedText)
+				: existingSourceText
 			subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
 			subtitleSourceTextByItemIdRef.current.set(resolvedUtterance.id, mergedSourceText)
 			subtitlePreviousItemIdByItemIdRef.current.set(resolvedUtterance.id, resolvedUtterance.previousId)
@@ -1041,6 +1156,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			onResultPatch: patch => {
 				clearTranslateDraftTimerByItemId(patch.itemId)
 				clearTranslateFinalTimerByItemId(patch.itemId)
+				subtitleRawSegmentTextByItemIdRef.current.delete(patch.itemId)
 				subtitleSourceTextByItemIdRef.current.delete(patch.itemId)
 				subtitlePreviousItemIdByItemIdRef.current.delete(patch.itemId)
 				subtitlePreviousUtteranceIdByUtteranceIdRef.current.delete(patch.itemId)
@@ -1115,10 +1231,12 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				}))
 			},
 			onSubtitleDelta: patch => {
-				const nextSegmentText = `${subtitleSegmentTextByItemIdRef.current.get(patch.itemId) ?? ''}${patch.textDelta}`
-				const normalizedSegmentText = normalizeWhitespace(nextSegmentText)
-				subtitleSegmentTextByItemIdRef.current.set(patch.itemId, nextSegmentText)
-				if (shouldDropSubtitleText(normalizedSegmentText)) {
+				const previousRawSegmentText = subtitleRawSegmentTextByItemIdRef.current.get(patch.itemId) ?? ''
+				const nextRawSegmentText = `${previousRawSegmentText}${patch.textDelta}`
+				subtitleRawSegmentTextByItemIdRef.current.set(patch.itemId, nextRawSegmentText)
+				const sanitizedSegmentText = sanitizeSubtitleText(nextRawSegmentText)
+				if (!sanitizedSegmentText) {
+					subtitleSegmentTextByItemIdRef.current.delete(patch.itemId)
 					setLiveSubtitleState(previousState => ({
 						...previousState,
 						activeSegmentId: patch.itemId,
@@ -1128,11 +1246,11 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 					}))
 					return
 				}
+				subtitleSegmentTextByItemIdRef.current.set(patch.itemId, sanitizedSegmentText)
 				const resolvedUtterance = resolveAudioUtterance(patch.itemId, patch.previousItemId)
-				const mergedSourceText = mergeUtteranceText(
-					subtitleSourceTextByItemIdRef.current.get(resolvedUtterance.id) ?? '',
-					patch.textDelta
-				)
+				const previousSourceText = subtitleSourceTextByItemIdRef.current.get(resolvedUtterance.id) ?? ''
+				const mergedSourceText = mergeUtteranceText(previousSourceText, sanitizedSegmentText)
+				if (mergedSourceText === previousSourceText) return
 				subtitleSourceTextByItemIdRef.current.set(resolvedUtterance.id, mergedSourceText)
 				subtitlePreviousItemIdByItemIdRef.current.set(
 					resolvedUtterance.id,
@@ -1282,6 +1400,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		(nextSettings: TranslateSettings) => {
 			const sanitizedSettings = sanitizeTranslateSettings(nextSettings)
 			clearAllTranslateStreamingTimers()
+			subtitleRawSegmentTextByItemIdRef.current.clear()
 			subtitleSegmentTextByItemIdRef.current.clear()
 			subtitleSourceTextByItemIdRef.current.clear()
 			subtitlePreviousItemIdByItemIdRef.current.clear()

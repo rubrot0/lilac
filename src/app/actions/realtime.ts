@@ -238,12 +238,15 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 		include: ['item.input_audio_transcription.logprobs'],
 		input_audio_format: 'pcm16',
 		input_audio_transcription: {
-			model: transcriptionModel,
-			prompt: 'Transcribe spoken words only. Do not add labels, metadata, or context notes.'
+			model: transcriptionModel
 		},
 		turn_detection: {
-			eagerness: parsedInput.turnEagerness,
-			type: 'semantic_vad'
+			create_response: false,
+			interrupt_response: false,
+			prefix_padding_ms: 300,
+			silence_duration_ms: 450,
+			threshold: 0.5,
+			type: 'server_vad'
 		}
 	})
 
