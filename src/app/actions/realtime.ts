@@ -1,5 +1,6 @@
 'use server'
 
+import { resolveRealtimeTranscriptionLanguageCode } from '@/realtime/languageCatalog'
 import {
 	defaultTranscriptionModel,
 	resolveTranscriptionModelFromEnvironment
@@ -11,7 +12,9 @@ import {
 	CreateRealtimeTranscriptionSessionActionOutputSchema,
 	CreateTranslateRealtimeClientSecretActionInputSchema,
 	CreateTranslateRealtimeClientSecretActionOutputSchema,
-	parseClientSecretResponse
+	parseClientSecretResponse,
+	RetranscribeTranslateAudioActionInputSchema,
+	RetranscribeTranslateAudioActionOutputSchema
 } from '@/realtime/schemas'
 import env from '~/env'
 
@@ -136,6 +139,94 @@ async function postOpenAi(path: string, body: unknown): Promise<unknown> {
 		}
 	}
 	throw new Error('OpenAI request exhausted retry attempts.')
+}
+
+async function postOpenAiMultipart(path: string, body: FormData): Promise<unknown> {
+	const maximumAttempts = 3
+	for (let attemptNumber = 1; attemptNumber <= maximumAttempts; attemptNumber += 1) {
+		try {
+			const response = await fetch(`${openAiApiBaseUrl}${path}`, {
+				body,
+				headers: {
+					Authorization: `Bearer ${env.OPENAI_API_KEY}`
+				},
+				method: 'POST'
+			})
+
+			const payload = await parseJsonResponse(response)
+
+			if (!response.ok) {
+				const fallbackMessage = `OpenAI request failed (${response.status})`
+				if (typeof payload === 'object' && payload !== null && 'error' in payload) {
+					const openAiError = (
+						payload as {
+							error?: {
+								code?: string
+								message?: string
+								param?: string
+								type?: string
+							}
+						}
+					).error
+					throw new OpenAiRequestError({
+						message: openAiError?.message || fallbackMessage,
+						status: response.status,
+						...(openAiError?.code ? { code: openAiError.code } : {}),
+						...(openAiError?.param ? { param: openAiError.param } : {}),
+						...(openAiError?.type ? { type: openAiError.type } : {})
+					})
+				}
+
+				throw new OpenAiRequestError({
+					message:
+						typeof payload === 'string' && payload.trim()
+							? truncateErrorMessage(payload.trim())
+							: fallbackMessage,
+					status: response.status
+				})
+			}
+
+			return payload
+		} catch (error) {
+			const isRetryableError =
+				error instanceof OpenAiRequestError
+					? isRetryableOpenAiStatus(error.status)
+					: error instanceof Error
+						? /timeout|timed out|gateway time-out|gateway timeout|fetch failed/i.test(error.message)
+						: false
+			if (!isRetryableError || attemptNumber >= maximumAttempts) {
+				throw error
+			}
+			await waitForRetryDelay(attemptNumber)
+		}
+	}
+	throw new Error('OpenAI multipart request exhausted retry attempts.')
+}
+
+function createWaveFileBufferFromPcm16Base64(audioPcm16Base64: string): Buffer {
+	const pcmBuffer = Buffer.from(audioPcm16Base64, 'base64')
+	const headerBuffer = Buffer.alloc(44)
+	const sampleRateHertz = 24_000
+	const channelCount = 1
+	const bitsPerSample = 16
+	const blockAlign = (channelCount * bitsPerSample) / 8
+	const byteRate = sampleRateHertz * blockAlign
+
+	headerBuffer.write('RIFF', 0)
+	headerBuffer.writeUInt32LE(36 + pcmBuffer.length, 4)
+	headerBuffer.write('WAVE', 8)
+	headerBuffer.write('fmt ', 12)
+	headerBuffer.writeUInt32LE(16, 16)
+	headerBuffer.writeUInt16LE(1, 20)
+	headerBuffer.writeUInt16LE(channelCount, 22)
+	headerBuffer.writeUInt32LE(sampleRateHertz, 24)
+	headerBuffer.writeUInt32LE(byteRate, 28)
+	headerBuffer.writeUInt16LE(blockAlign, 32)
+	headerBuffer.writeUInt16LE(bitsPerSample, 34)
+	headerBuffer.write('data', 36)
+	headerBuffer.writeUInt32LE(pcmBuffer.length, 40)
+
+	return Buffer.concat([headerBuffer, pcmBuffer])
 }
 
 function createTranslateInstructions(
@@ -281,6 +372,9 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 }> {
 	const parsedInput = CreateRealtimeTranscriptionSessionActionInputSchema.parse(input)
 	const transcriptionModel = resolveTranscriptionModelFromEnvironment(parsedInput.asrProfile)
+	const transcriptionLanguageCode = resolveRealtimeTranscriptionLanguageCode(
+		parsedInput.myLanguageCode
+	)
 
 	const payload = await postOpenAi('/realtime/transcription_sessions', {
 		include: ['item.input_audio_transcription.logprobs'],
@@ -289,11 +383,42 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 			type: 'near_field'
 		},
 		input_audio_transcription: {
-			model: transcriptionModel
+			model: transcriptionModel,
+			...(transcriptionLanguageCode ? { language: transcriptionLanguageCode } : {})
 		},
 		turn_detection: null
 	})
 
 	const parsedSecret = parseClientSecretResponse(payload)
 	return CreateRealtimeTranscriptionSessionActionOutputSchema.parse(parsedSecret)
+}
+
+export async function retranscribeTranslateAudioAction(input: unknown): Promise<{
+	transcript: string
+}> {
+	const parsedInput = RetranscribeTranslateAudioActionInputSchema.parse(input)
+	const transcriptionLanguageCode = resolveRealtimeTranscriptionLanguageCode(
+		parsedInput.languageCode
+	)
+	const transcriptionModel = resolveTranscriptionModelFromEnvironment('accurate')
+	const waveFileBuffer = createWaveFileBufferFromPcm16Base64(parsedInput.audioPcm16Base64)
+	const formData = new FormData()
+	formData.append(
+		'file',
+		new File([Uint8Array.from(waveFileBuffer)], 'utterance.wav', {
+			type: 'audio/wav'
+		})
+	)
+	formData.append('model', transcriptionModel)
+	formData.append('response_format', 'json')
+	formData.append('temperature', '0')
+	if (transcriptionLanguageCode) {
+		formData.append('language', transcriptionLanguageCode)
+	}
+
+	const payload = await postOpenAiMultipart('/audio/transcriptions', formData)
+	const parsedPayload = RetranscribeTranslateAudioActionOutputSchema.parse(payload)
+	return {
+		transcript: parsedPayload.text.trim()
+	}
 }

@@ -95,6 +95,12 @@ export function normalizeLanguageCode(languageCode: string): string {
 	return languageCode.trim().toLowerCase()
 }
 
+export function resolveRealtimeTranscriptionLanguageCode(languageCode: string): null | string {
+	const normalizedLanguageCode = normalizeLanguageCode(languageCode)
+	const [primarySubtag = ''] = normalizedLanguageCode.split('-')
+	return /^[a-z]{2,3}$/i.test(primarySubtag) ? primarySubtag : null
+}
+
 export function isValidLanguageCode(languageCode: string): boolean {
 	return languageCodePattern.test(languageCode.trim())
 }

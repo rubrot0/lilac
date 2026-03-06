@@ -70,6 +70,15 @@ export const CreateRealtimeTranscriptionSessionActionOutputSchema = z.object({
 	value: z.string().min(1)
 })
 
+export const RetranscribeTranslateAudioActionInputSchema = z.object({
+	audioPcm16Base64: z.string().min(1),
+	languageCode: LanguageCodeSchema
+})
+
+export const RetranscribeTranslateAudioActionOutputSchema = z.object({
+	text: z.string().min(1)
+})
+
 export const PublishTranslationToolArgumentsSchema = z.object({
 	direction: z.enum(['my_to_target', 'target_to_my']),
 	sourceLanguageCode: LanguageCodeSchema,

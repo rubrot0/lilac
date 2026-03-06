@@ -15,7 +15,7 @@ export const TranslationModelSchema = z.enum(translationModelValues)
 export const TranscriptionAsrProfileSchema = z.enum(transcriptionAsrProfileValues)
 
 export const defaultChatRealtimeModel = 'gpt-realtime-1.5'
-export const defaultTranscriptionModel = 'gpt-4o-transcribe'
+export const defaultTranscriptionModel = 'gpt-4o-mini-transcribe'
 export const latestTranscriptionModel = 'gpt-4o-transcribe-latest'
 export const fastTranscriptionModel = 'gpt-4o-mini-transcribe'
 export const defaultTranscriptionAsrProfile = 'accurate'

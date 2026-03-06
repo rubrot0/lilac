@@ -21,7 +21,7 @@ type ResolveAudioUtteranceResult = {
 	utteranceId: string
 }
 
-const audioUtteranceReuseThresholdMilliseconds = 1200
+const audioUtteranceReuseThresholdMilliseconds = 2200
 
 export function createTranslateRuntimeState(): TranslateRuntimeState {
 	return {
@@ -519,6 +519,30 @@ export function getTranslateCommittedSourceText(
 	utteranceId: string
 ): string {
 	return state.utteranceById[utteranceId]?.sourceCommittedText ?? ''
+}
+
+export function applyCanonicalTranslateSourceText(
+	state: TranslateRuntimeState,
+	input: {
+		sourceText: string
+		utteranceId: string
+	}
+): TranslateRuntimeState {
+	const utterance = state.utteranceById[input.utteranceId]
+	if (!utterance) return state
+	const normalizedSourceText = normalizeWhitespace(input.sourceText)
+	if (!normalizedSourceText) return state
+	return {
+		...state,
+		utteranceById: {
+			...state.utteranceById,
+			[input.utteranceId]: {
+				...utterance,
+				sourceCommittedText: normalizedSourceText,
+				sourceLiveText: normalizedSourceText
+			}
+		}
+	}
 }
 
 export function getTranslateLatestConfidence(

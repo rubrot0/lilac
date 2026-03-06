@@ -11,6 +11,7 @@ import {
 	useState
 } from 'react'
 
+import { retranscribeTranslateAudioAction } from '@/app/actions/realtime'
 import { emitLilacTestBusEvent } from '@/evals/testBus'
 import { ChatRealtimeClient, type ChatTranscriptPatch } from '@/realtime/chatRealtimeClient'
 import { resolveLanguageCode } from '@/realtime/languageCatalog'
@@ -40,10 +41,12 @@ import {
 	SubtitleTranscriptionClient
 } from '@/realtime/subtitleTranscriptionClient'
 import {
+	applyCanonicalTranslateSourceText,
 	applySubtitleSegmentDelta,
 	applySubtitleSegmentFinal,
 	applyTranslateDraftPatch as applyTranslateRuntimeDraftPatch,
 	applyTranslateResultPatch as applyTranslateRuntimeResultPatch,
+	clearTranslateUtterance,
 	createTranslateRuntimeState,
 	getTranslateCommittedSourceText,
 	getTranslateLatestConfidence,
@@ -105,15 +108,47 @@ type PendingTranslateInput =
 			requestKind: 'draft'
 	  })
 
+type RecentFinalizedTranslateUtterance = {
+	createdAt: number
+	sourceText: string
+	utteranceId: string
+}
+
 const reconnectStatusGraceMilliseconds = 1500
 const subtitleDedupRoundedTimeWindowMilliseconds = 700
 const finalTranslateLowConfidenceThreshold = 0.6
 const finalTranslateLowConfidenceDelayMilliseconds = 280
-const finalTranslateSilenceDelayMilliseconds = 1200
+const finalTranslateSilenceDelayMilliseconds = 1800
 const minimumDraftTextLength = 2
 const minimumDraftTextDeltaLength = 4
 const isTranslateStreamingV2Enabled =
 	process.env.NEXT_PUBLIC_LILAC_TRANSLATE_STREAMING_V2 !== 'false'
+
+function concatInt16ArrayList(inputList: Int16Array[]): Int16Array {
+	const totalLength = inputList.reduce((sum, inputArray) => sum + inputArray.length, 0)
+	const outputArray = new Int16Array(totalLength)
+	let outputOffset = 0
+	for (const inputArray of inputList) {
+		outputArray.set(inputArray, outputOffset)
+		outputOffset += inputArray.length
+	}
+	return outputArray
+}
+
+function int16ArrayToBase64(inputArray: Int16Array): string {
+	const byteView = new Uint8Array(inputArray.buffer)
+	const chunkSize = 0x8000
+	let binaryString = ''
+	for (let offset = 0; offset < byteView.length; offset += chunkSize) {
+		const chunk = byteView.subarray(offset, offset + chunkSize)
+		let chunkString = ''
+		for (let byteIndex = 0; byteIndex < chunk.length; byteIndex += 1) {
+			chunkString += String.fromCharCode(chunk[byteIndex] ?? 0)
+		}
+		binaryString += chunkString
+	}
+	return btoa(binaryString)
+}
 
 function parsePositiveIntegerEnvironmentValue(
 	name: string,
@@ -206,6 +241,57 @@ function isEquivalentTranscriptionChunk(leftValue: string, rightValue: string): 
 		return true
 	}
 	return false
+}
+
+function isLikelyEchoUtterance(candidateText: string, previousText: string): boolean {
+	const normalizedCandidateText = normalizeWhitespace(candidateText)
+	const normalizedPreviousText = normalizeWhitespace(previousText)
+	if (!normalizedCandidateText || !normalizedPreviousText) return false
+	if (isEquivalentTranscriptionChunk(normalizedCandidateText, normalizedPreviousText)) return true
+
+	const canonicalCandidateText = canonicalizeTranscriptionText(normalizedCandidateText)
+	const canonicalPreviousText = canonicalizeTranscriptionText(normalizedPreviousText)
+	if (!canonicalCandidateText || !canonicalPreviousText) return false
+	if (canonicalCandidateText.length < 8) return false
+	if (canonicalPreviousText.endsWith(canonicalCandidateText)) return true
+	if (
+		canonicalPreviousText.includes(canonicalCandidateText) &&
+		canonicalCandidateText.length <= Math.floor(canonicalPreviousText.length * 0.75)
+	) {
+		return true
+	}
+	return false
+}
+
+function shouldSuppressPostFinalDelta(input: {
+	now: number
+	previousSourceText: string
+	recentFinalizedUtterance: null | RecentFinalizedTranslateUtterance
+	text: string
+}): boolean {
+	const normalizedText = normalizeWhitespace(input.text)
+	if (!normalizedText) return true
+	const signalCharacterCount = canonicalizeTranscriptionText(normalizedText).length
+	const wordCount = normalizedText.split(' ').filter(Boolean).length
+	if (signalCharacterCount > 14 && wordCount > 3) return false
+
+	const normalizedPreviousSourceText = normalizeWhitespace(input.previousSourceText)
+	if (normalizedPreviousSourceText) {
+		const canonicalPreviousSourceText = canonicalizeTranscriptionText(normalizedPreviousSourceText)
+		const canonicalNextSourceText = canonicalizeTranscriptionText(normalizedText)
+		if (
+			canonicalNextSourceText &&
+			(canonicalPreviousSourceText.startsWith(canonicalNextSourceText) ||
+				canonicalPreviousSourceText.endsWith(canonicalNextSourceText) ||
+				canonicalPreviousSourceText.includes(canonicalNextSourceText))
+		) {
+			return true
+		}
+	}
+
+	const { recentFinalizedUtterance } = input
+	if (!recentFinalizedUtterance) return false
+	return input.now - recentFinalizedUtterance.createdAt <= 2_200
 }
 
 function getChatRoleSortValue(role: 'assistant' | 'user'): number {
@@ -496,8 +582,10 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	const chatTranscriptSequenceRef = useRef(1)
 	const translateRuntimeStateRef = useRef<TranslateRuntimeState>(createTranslateRuntimeState())
 	const subtitleDedupKeyTimestampByKeyRef = useRef<Map<string, number>>(new Map())
+	const subtitleSegmentAudioByItemIdRef = useRef<Map<string, Int16Array>>(new Map())
 	const subtitleRawSegmentTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const translateDraftSequenceByItemIdRef = useRef<Map<string, number>>(new Map())
+	const translateFinalSourceRequestSequenceByItemIdRef = useRef<Map<string, number>>(new Map())
 	const translateLastDraftSourceTextByItemIdRef = useRef<Map<string, string>>(new Map())
 	const translateDraftScheduleTimerByItemIdRef = useRef<Map<string, number>>(new Map())
 	const translateFinalScheduleTimerByItemIdRef = useRef<Map<string, number>>(new Map())
@@ -512,6 +600,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 	const previousChatEventFingerprintByIdRef = useRef<Map<string, string>>(new Map())
 	const previousSubtitleFingerprintRef = useRef('')
 	const previousTranslateCardFingerprintByIdRef = useRef<Map<string, string>>(new Map())
+	const recentFinalizedTranslateUtteranceRef = useRef<null | RecentFinalizedTranslateUtterance>(null)
 	const hasSeenConnectedStateByModeRef = useRef<Record<LilacMode, boolean>>({
 		chat: false,
 		translate: false
@@ -554,6 +643,14 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		translateFinalScheduleTimerByItemIdRef.current.clear()
 	}, [])
 
+	const clearStoredSubtitleAudioForUtterance = useCallback((utteranceId: string): void => {
+		const utterance = translateRuntimeStateRef.current.utteranceById[utteranceId]
+		if (!utterance) return
+		for (const segmentId of utterance.orderedSegmentIds) {
+			subtitleSegmentAudioByItemIdRef.current.delete(segmentId)
+		}
+	}, [])
+
 	const syncTranslateRuntimeState = useCallback((nextState: TranslateRuntimeState): void => {
 		translateRuntimeStateRef.current = nextState
 		setTranslateCards(selectTranslateCards(nextState))
@@ -565,6 +662,25 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		liveSubtitleStateRef.current = nextLiveSubtitleState
 		setLiveSubtitleState(nextLiveSubtitleState)
 	}, [])
+
+	const clearTranslateUtteranceArtifacts = useCallback(
+		(utteranceId: string): void => {
+			const utterance = translateRuntimeStateRef.current.utteranceById[utteranceId]
+			if (!utterance) return
+			clearTranslateDraftTimerByItemId(utteranceId)
+			clearTranslateFinalTimerByItemId(utteranceId)
+			for (const segmentId of utterance.orderedSegmentIds) {
+				subtitleSegmentAudioByItemIdRef.current.delete(segmentId)
+				subtitleRawSegmentTextByItemIdRef.current.delete(segmentId)
+			}
+			translateDraftSequenceByItemIdRef.current.delete(utteranceId)
+			translateFinalSourceRequestSequenceByItemIdRef.current.delete(utteranceId)
+			translateLastDraftSourceTextByItemIdRef.current.delete(utteranceId)
+			const nextState = clearTranslateUtterance(translateRuntimeStateRef.current, utteranceId)
+			syncTranslateRuntimeState(nextState)
+		},
+		[clearTranslateDraftTimerByItemId, clearTranslateFinalTimerByItemId, syncTranslateRuntimeState]
+	)
 
 	const stopChatClient = useCallback(() => {
 		intentionalStopByChannelRef.current.chat = true
@@ -591,10 +707,13 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		void subtitleClientRef.current?.stop()
 		subtitleClientRef.current = null
 		clearAllTranslateStreamingTimers()
+		subtitleSegmentAudioByItemIdRef.current.clear()
 		subtitleRawSegmentTextByItemIdRef.current.clear()
 		translateRuntimeStateRef.current = createTranslateRuntimeState()
 		translateDraftSequenceByItemIdRef.current.clear()
+		translateFinalSourceRequestSequenceByItemIdRef.current.clear()
 		translateLastDraftSourceTextByItemIdRef.current.clear()
+		recentFinalizedTranslateUtteranceRef.current = null
 		setSubtitleChannelState('disconnected')
 		liveSubtitleStateRef.current = defaultLiveSubtitleState
 		setLiveSubtitleState(defaultLiveSubtitleState)
@@ -617,9 +736,12 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		setLiveSubtitleState(defaultLiveSubtitleState)
 		translateRuntimeStateRef.current = createTranslateRuntimeState()
 		subtitleDedupKeyTimestampByKeyRef.current.clear()
+		subtitleSegmentAudioByItemIdRef.current.clear()
 		subtitleRawSegmentTextByItemIdRef.current.clear()
 		translateDraftSequenceByItemIdRef.current.clear()
+		translateFinalSourceRequestSequenceByItemIdRef.current.clear()
 		translateLastDraftSourceTextByItemIdRef.current.clear()
+		recentFinalizedTranslateUtteranceRef.current = null
 		chatTranscriptSequenceRef.current = 1
 		clearAllTranslateStreamingTimers()
 		pendingTranslateInputQueueRef.current = []
@@ -729,29 +851,122 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			const delayMilliseconds = finalTranslateSilenceDelayMilliseconds + lowConfidenceDelayMilliseconds
 			const timerId = window.setTimeout(() => {
 				translateFinalScheduleTimerByItemIdRef.current.delete(itemId)
-				const latestSourceText = normalizeWhitespace(
-					getTranslateCommittedSourceText(translateRuntimeStateRef.current, itemId)
-				)
-				if (!latestSourceText) return
-				enqueueTranslateInput({
-					inputOrigin,
-					itemId,
-					requestKind: 'final',
-					text: latestSourceText
-				})
+				void (async () => {
+					let latestSourceText = normalizeWhitespace(
+						getTranslateCommittedSourceText(translateRuntimeStateRef.current, itemId)
+					)
+					if (!latestSourceText) return
+
+					if (inputOrigin === 'audio') {
+						const utterance = translateRuntimeStateRef.current.utteranceById[itemId]
+						const audioChunkList =
+							utterance?.orderedSegmentIds
+								.map(segmentId => subtitleSegmentAudioByItemIdRef.current.get(segmentId))
+								.filter((value): value is Int16Array => value instanceof Int16Array) ?? []
+						if (utterance && audioChunkList.length > 0) {
+							const requestSequence =
+								(translateFinalSourceRequestSequenceByItemIdRef.current.get(itemId) ?? 0) + 1
+							translateFinalSourceRequestSequenceByItemIdRef.current.set(itemId, requestSequence)
+							try {
+								const retranscription = await retranscribeTranslateAudioAction({
+									audioPcm16Base64: int16ArrayToBase64(concatInt16ArrayList(audioChunkList)),
+									languageCode: utterance.sourceLanguageCode || translateSettingsRef.current.myLanguageCode
+								})
+								if (
+									translateFinalSourceRequestSequenceByItemIdRef.current.get(itemId) !== requestSequence
+								) {
+									return
+								}
+								const canonicalSourceText = sanitizeSubtitleText(retranscription.transcript)
+								if (!canonicalSourceText) {
+									throw new Error('Final retranscription returned empty text.')
+								}
+								if (canonicalSourceText !== latestSourceText) {
+									const nextState = applyCanonicalTranslateSourceText(translateRuntimeStateRef.current, {
+										sourceText: canonicalSourceText,
+										utteranceId: itemId
+									})
+									syncTranslateRuntimeState(nextState)
+									latestSourceText = canonicalSourceText
+								}
+								const recentFinalizedUtterance = recentFinalizedTranslateUtteranceRef.current
+								if (
+									recentFinalizedUtterance &&
+									recentFinalizedUtterance.utteranceId !== itemId &&
+									Date.now() - recentFinalizedUtterance.createdAt <= 6_000 &&
+									isLikelyEchoUtterance(latestSourceText, recentFinalizedUtterance.sourceText)
+								) {
+									clearTranslateUtteranceArtifacts(itemId)
+									return
+								}
+							} catch (error) {
+								const currentUtterance = translateRuntimeStateRef.current.utteranceById[itemId]
+								if (!currentUtterance) return
+								const nextState = applyTranslateRuntimeResultPatch(
+									translateRuntimeStateRef.current,
+									{
+										direction: currentUtterance.direction,
+										inputOrigin,
+										itemId,
+										sourceLanguageCode:
+											currentUtterance.sourceLanguageCode || translateSettingsRef.current.myLanguageCode,
+										sourceText: latestSourceText,
+										status: 'error',
+										targetLanguageCode:
+											currentUtterance.targetLanguageCode ||
+											translateSettingsRef.current.translateToLanguageCode,
+										translatedText:
+											error instanceof Error ? error.message : 'Unable to finalize the transcript.'
+									},
+									translateSettingsRef.current,
+									Date.now()
+								)
+								syncTranslateRuntimeState(nextState)
+								return
+							}
+						}
+					}
+
+					enqueueTranslateInput({
+						inputOrigin,
+						itemId,
+						requestKind: 'final',
+						text: latestSourceText
+					})
+				})()
 			}, delayMilliseconds)
 			translateFinalScheduleTimerByItemIdRef.current.set(itemId, timerId)
 		},
-		[clearTranslateFinalTimerByItemId, enqueueTranslateInput]
+		[
+			clearTranslateFinalTimerByItemId,
+			clearTranslateUtteranceArtifacts,
+			enqueueTranslateInput,
+			syncTranslateRuntimeState
+		]
 	)
 
 	const handleTranslateSubtitleFinalPatch = useCallback(
 		(patch: SubtitleFinalPatch) => {
-			const normalizedText = sanitizeSubtitleText(patch.text)
 			subtitleRawSegmentTextByItemIdRef.current.delete(patch.itemId)
-			if (!normalizedText) return
+			if (patch.audioPcm16Data) {
+				subtitleSegmentAudioByItemIdRef.current.set(patch.itemId, patch.audioPcm16Data)
+			}
+			const normalizedText = sanitizeSubtitleText(patch.text)
+			if (!normalizedText) {
+				subtitleSegmentAudioByItemIdRef.current.delete(patch.itemId)
+				return
+			}
 
 			const now = Date.now()
+			const recentFinalizedUtterance = recentFinalizedTranslateUtteranceRef.current
+			if (
+				recentFinalizedUtterance &&
+				now - recentFinalizedUtterance.createdAt <= 2_500 &&
+				isLikelyEchoUtterance(normalizedText, recentFinalizedUtterance.sourceText)
+			) {
+				subtitleSegmentAudioByItemIdRef.current.delete(patch.itemId)
+				return
+			}
 			const roundedTimestamp =
 				Math.round(now / subtitleDedupRoundedTimeWindowMilliseconds) *
 				subtitleDedupRoundedTimeWindowMilliseconds
@@ -759,6 +974,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			const dedupeKey = `${canonicalText}::${roundedTimestamp}::${translateSettingsRef.current.myLanguageCode}`
 			const previousTimestamp = subtitleDedupKeyTimestampByKeyRef.current.get(dedupeKey)
 			if (typeof previousTimestamp === 'number' && now - previousTimestamp < 2500) {
+				subtitleSegmentAudioByItemIdRef.current.delete(patch.itemId)
 				return
 			}
 			subtitleDedupKeyTimestampByKeyRef.current.set(dedupeKey, now)
@@ -858,13 +1074,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				}
 			},
 			onDraftDeltaPatch: patch => {
-				const nextState = applyTranslateRuntimeDraftPatch(
-					translateRuntimeStateRef.current,
-					patch,
-					translateSettingsRef.current,
-					Date.now()
-				)
-				syncTranslateRuntimeState(nextState)
+				void patch
 			},
 			onDraftDonePatch: patch => {
 				const nextState = applyTranslateRuntimeDraftPatch(
@@ -885,7 +1095,9 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 			onResultPatch: patch => {
 				clearTranslateDraftTimerByItemId(patch.itemId)
 				clearTranslateFinalTimerByItemId(patch.itemId)
+				clearStoredSubtitleAudioForUtterance(patch.itemId)
 				translateDraftSequenceByItemIdRef.current.delete(patch.itemId)
+				translateFinalSourceRequestSequenceByItemIdRef.current.delete(patch.itemId)
 				translateLastDraftSourceTextByItemIdRef.current.delete(patch.itemId)
 				const nextState = applyTranslateRuntimeResultPatch(
 					translateRuntimeStateRef.current,
@@ -894,6 +1106,16 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 					Date.now()
 				)
 				syncTranslateRuntimeState(nextState)
+				if (patch.status === 'final') {
+					const normalizedSourceText = normalizeWhitespace(patch.sourceText)
+					if (normalizedSourceText) {
+						recentFinalizedTranslateUtteranceRef.current = {
+							createdAt: Date.now(),
+							sourceText: normalizedSourceText,
+							utteranceId: patch.itemId
+						}
+					}
+				}
 			}
 		})
 		liveTranslateClientRef.current = translateClient
@@ -904,6 +1126,7 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		})
 	}, [
 		clearReconnectTimer,
+		clearStoredSubtitleAudioForUtterance,
 		clearTranslateDraftTimerByItemId,
 		clearTranslateFinalTimerByItemId,
 		flushPendingTranslateInputs,
@@ -955,13 +1178,57 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 				if (!sanitizedSegmentText) {
 					return
 				}
+				const now = Date.now()
+				const existingSegment = translateRuntimeStateRef.current.segmentById[patch.itemId]
+				const mostRecentUtteranceId =
+					translateRuntimeStateRef.current.orderedUtteranceIds[
+						translateRuntimeStateRef.current.orderedUtteranceIds.length - 1
+					] ?? null
+				const mostRecentUtteranceSourceText =
+					(mostRecentUtteranceId
+						? translateRuntimeStateRef.current.utteranceById[mostRecentUtteranceId]
+								?.sourceCommittedText ||
+							translateRuntimeStateRef.current.utteranceById[mostRecentUtteranceId]?.sourceLiveText
+						: '') ?? ''
+				if (
+					!existingSegment &&
+					shouldSuppressPostFinalDelta({
+						now,
+						previousSourceText: mostRecentUtteranceSourceText,
+						recentFinalizedUtterance: recentFinalizedTranslateUtteranceRef.current,
+						text: sanitizedSegmentText
+					})
+				) {
+					return
+				}
 				const nextState = applySubtitleSegmentDelta(translateRuntimeStateRef.current, {
 					itemId: patch.itemId,
-					now: Date.now(),
+					now,
 					previousItemId: patch.previousItemId ?? null,
 					settings: translateSettingsRef.current,
 					text: sanitizedSegmentText
 				})
+				const nextUtteranceId = nextState.segmentById[patch.itemId]?.utteranceId
+				const nextUtterance = nextUtteranceId ? nextState.utteranceById[nextUtteranceId] : null
+				const previousUtterance = nextUtterance?.previousUtteranceId
+					? nextState.utteranceById[nextUtterance.previousUtteranceId]
+					: null
+				const shouldDropEchoUtterance =
+					nextUtteranceId &&
+					nextUtterance &&
+					previousUtterance &&
+					shouldSuppressPostFinalDelta({
+						now,
+						previousSourceText: previousUtterance.sourceCommittedText || previousUtterance.sourceLiveText,
+						recentFinalizedUtterance: recentFinalizedTranslateUtteranceRef.current,
+						text: nextUtterance.sourceCommittedText || nextUtterance.sourceLiveText
+					})
+				if (shouldDropEchoUtterance) {
+					subtitleRawSegmentTextByItemIdRef.current.delete(patch.itemId)
+					subtitleSegmentAudioByItemIdRef.current.delete(patch.itemId)
+					syncTranslateRuntimeState(clearTranslateUtterance(nextState, nextUtteranceId))
+					return
+				}
 				liveSubtitleStateRef.current = {
 					...liveSubtitleStateRef.current,
 					isListening: true
@@ -1101,10 +1368,13 @@ export function LilacModeRuntimeProvider({ children }: { children: ReactNode }) 
 		(nextSettings: TranslateSettings) => {
 			const sanitizedSettings = sanitizeTranslateSettings(nextSettings)
 			clearAllTranslateStreamingTimers()
+			subtitleSegmentAudioByItemIdRef.current.clear()
 			subtitleRawSegmentTextByItemIdRef.current.clear()
 			translateRuntimeStateRef.current = createTranslateRuntimeState()
 			translateDraftSequenceByItemIdRef.current.clear()
+			translateFinalSourceRequestSequenceByItemIdRef.current.clear()
 			translateLastDraftSourceTextByItemIdRef.current.clear()
+			recentFinalizedTranslateUtteranceRef.current = null
 			pendingTranslateInputQueueRef.current = []
 			setTranslateSettingsState(sanitizedSettings)
 			setTranslateCards([])
