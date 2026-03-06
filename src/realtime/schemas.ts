@@ -214,6 +214,25 @@ export const ResponseOutputAudioTranscriptDeltaEventSchema = z
 	})
 	.passthrough()
 
+export const ResponseOutputAudioTranscriptDoneEventSchema = z
+	.object({
+		item_id: z.string().optional(),
+		response_id: z.string().optional(),
+		transcript: z.string().optional(),
+		type: z.literal('response.output_audio_transcript.done')
+	})
+	.passthrough()
+
+export const ResponseOutputAudioDoneEventSchema = z
+	.object({
+		item_id: z.string().optional(),
+		part: ConversationItemContentPartSchema.optional(),
+		response_id: z.string().optional(),
+		transcript: z.string().optional(),
+		type: z.literal('response.output_audio.done')
+	})
+	.passthrough()
+
 export const ResponseOutputItemAddedEventSchema = z
 	.object({
 		item: z
@@ -223,6 +242,36 @@ export const ResponseOutputItemAddedEventSchema = z
 			.passthrough(),
 		response_id: z.string().optional(),
 		type: z.literal('response.output_item.added')
+	})
+	.passthrough()
+
+export const ResponseOutputItemCreatedEventSchema = z
+	.object({
+		item: z
+			.object({
+				id: z.string()
+			})
+			.passthrough(),
+		response_id: z.string().optional(),
+		type: z.literal('response.output_item.created')
+	})
+	.passthrough()
+
+export const ResponseContentPartAddedEventSchema = z
+	.object({
+		item_id: z.string().optional(),
+		part: ConversationItemContentPartSchema.optional(),
+		response_id: z.string().optional(),
+		type: z.literal('response.content_part.added')
+	})
+	.passthrough()
+
+export const ResponseContentPartDoneEventSchema = z
+	.object({
+		item_id: z.string().optional(),
+		part: ConversationItemContentPartSchema.optional(),
+		response_id: z.string().optional(),
+		type: z.literal('response.content_part.done')
 	})
 	.passthrough()
 

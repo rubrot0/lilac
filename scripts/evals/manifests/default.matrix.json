@@ -1,0 +1,74 @@
+{
+	"baseline": {
+		"asrModelSlug": "gpt-4o-transcribe",
+		"buildEnvironmentOverrides": {},
+		"chatTurnOrderingProfile": "slot_reconciliation",
+		"featureFlags": {
+			"lilac_translate_streaming_v2": true
+		},
+		"id": "baseline-prod",
+		"label": "Production baseline",
+		"promptVersionIds": {
+			"chat": "current",
+			"translate": "current"
+		},
+		"realtimeModelSlug": "gpt-realtime-1.5",
+		"translateLanguageGroundingMode": "pair_locked"
+	},
+	"candidateList": [
+		{
+			"asrModelSlug": "gpt-4o-transcribe",
+			"buildEnvironmentOverrides": {},
+			"chatTurnOrderingProfile": "slot_reconciliation",
+			"featureFlags": {
+				"lilac_translate_streaming_v2": true
+			},
+			"id": "workspace-preview",
+			"label": "Workspace preview",
+			"promptVersionIds": {
+				"chat": "current",
+				"translate": "current"
+			},
+			"realtimeModelSlug": "gpt-realtime-1.5",
+			"translateLanguageGroundingMode": "pair_locked"
+		},
+		{
+			"asrModelSlug": "gpt-4o-transcribe-latest",
+			"buildEnvironmentOverrides": {},
+			"chatTurnOrderingProfile": "slot_reconciliation",
+			"featureFlags": {
+				"lilac_translate_streaming_v2": true
+			},
+			"id": "asr-latest",
+			"label": "ASR latest candidate",
+			"promptVersionIds": {
+				"chat": "current",
+				"translate": "current"
+			},
+			"realtimeModelSlug": "gpt-realtime-1.5",
+			"translateCommitIntervalMilliseconds": 820,
+			"translateLanguageGroundingMode": "pair_locked",
+			"translateMinimumCommitAudioMilliseconds": 300
+		},
+		{
+			"asrModelSlug": "gpt-4o-mini-transcribe",
+			"buildEnvironmentOverrides": {},
+			"chatTurnOrderingProfile": "slot_reconciliation",
+			"featureFlags": {
+				"lilac_translate_streaming_v2": true
+			},
+			"id": "asr-mini-fast",
+			"label": "ASR mini candidate",
+			"promptVersionIds": {
+				"chat": "current",
+				"translate": "balanced"
+			},
+			"realtimeModelSlug": "gpt-realtime-1.5",
+			"translateCommitIntervalMilliseconds": 700,
+			"translateLanguageGroundingMode": "pair_locked",
+			"translateMinimumCommitAudioMilliseconds": 260
+		}
+	],
+	"id": "lilac-default",
+	"version": 1
+}

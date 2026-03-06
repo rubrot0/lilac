@@ -1,0 +1,70 @@
+name: eval-flywheel
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      autoprod:
+        description: Promote to production when all gates pass
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  flywheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Dependencies
+        run: bun install
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel Project Settings
+        run: vercel pull --yes --environment preview --token "$VERCEL_TOKEN"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+
+      - name: Generate Eval Audio Fixtures
+        run: bun run eval:prepare-audio
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Run Eval Flywheel
+        run: bun run eval:flywheel
+        env:
+          CI: "true"
+          LILAC_FLYWHEEL_ENABLED: "true"
+          LILAC_FLYWHEEL_AUTOPROD_ENABLED: ${{ github.event.inputs.autoprod || 'false' }}
+          LILAC_FLYWHEEL_BUDGET_USD_LIMIT: "30"
+          LILAC_FLYWHEEL_MAX_PATCH_ATTEMPTS_PER_FAILURE: "1"
+          LILAC_FLYWHEEL_MAX_RUNS_PER_DAY: "8"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Upload Eval Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-artifacts
+          path: .artifacts/evals
+          if-no-files-found: ignore

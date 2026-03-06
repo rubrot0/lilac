@@ -2,7 +2,7 @@
 
 import {
 	defaultTranscriptionModel,
-	resolveTranscriptionModelForAsrProfile
+	resolveTranscriptionModelFromEnvironment
 } from '@/realtime/modelConfig'
 import {
 	CreateRealtimeClientSecretActionInputSchema,
@@ -51,47 +51,91 @@ async function parseJsonResponse(response: Response): Promise<unknown> {
 	try {
 		return JSON.parse(responseText) as unknown
 	} catch {
-		throw new Error(responseText)
+		return responseText
 	}
 }
 
-async function postOpenAi(path: string, body: unknown): Promise<unknown> {
-	const response = await fetch(`${openAiApiBaseUrl}${path}`, {
-		body: JSON.stringify(body),
-		headers: defaultRequestHeaders,
-		method: 'POST'
-	})
-
-	const payload = await parseJsonResponse(response)
-
-	if (!response.ok) {
-		const fallbackMessage = `OpenAI request failed (${response.status})`
-		if (typeof payload === 'object' && payload !== null && 'error' in payload) {
-			const openAiError = (
-				payload as {
-					error?: {
-						code?: string
-						message?: string
-						param?: string
-						type?: string
-					}
-				}
-			).error
-			throw new OpenAiRequestError({
-				message: openAiError?.message || fallbackMessage,
-				status: response.status,
-				...(openAiError?.code ? { code: openAiError.code } : {}),
-				...(openAiError?.param ? { param: openAiError.param } : {}),
-				...(openAiError?.type ? { type: openAiError.type } : {})
-			})
-		}
-		throw new OpenAiRequestError({
-			message: fallbackMessage,
-			status: response.status
-		})
+function isRetryableOpenAiStatus(status: number): boolean {
+	switch (status) {
+		case 408:
+		case 429:
+		case 500:
+		case 502:
+		case 503:
+		case 504:
+			return true
+		default:
+			return false
 	}
+}
 
-	return payload
+function truncateErrorMessage(message: string, maximumLength = 240): string {
+	return message.length <= maximumLength ? message : `${message.slice(0, maximumLength - 1)}…`
+}
+
+async function waitForRetryDelay(attemptNumber: number): Promise<void> {
+	const delayMilliseconds = 250 * 2 ** Math.max(0, attemptNumber - 1)
+	await new Promise(resolveDelay => setTimeout(resolveDelay, delayMilliseconds))
+}
+
+async function postOpenAi(path: string, body: unknown): Promise<unknown> {
+	const maximumAttempts = 3
+	for (let attemptNumber = 1; attemptNumber <= maximumAttempts; attemptNumber += 1) {
+		try {
+			const response = await fetch(`${openAiApiBaseUrl}${path}`, {
+				body: JSON.stringify(body),
+				headers: defaultRequestHeaders,
+				method: 'POST'
+			})
+
+			const payload = await parseJsonResponse(response)
+
+			if (!response.ok) {
+				const fallbackMessage = `OpenAI request failed (${response.status})`
+				if (typeof payload === 'object' && payload !== null && 'error' in payload) {
+					const openAiError = (
+						payload as {
+							error?: {
+								code?: string
+								message?: string
+								param?: string
+								type?: string
+							}
+						}
+					).error
+					throw new OpenAiRequestError({
+						message: openAiError?.message || fallbackMessage,
+						status: response.status,
+						...(openAiError?.code ? { code: openAiError.code } : {}),
+						...(openAiError?.param ? { param: openAiError.param } : {}),
+						...(openAiError?.type ? { type: openAiError.type } : {})
+					})
+				}
+
+				throw new OpenAiRequestError({
+					message:
+						typeof payload === 'string' && payload.trim()
+							? truncateErrorMessage(payload.trim())
+							: fallbackMessage,
+					status: response.status
+				})
+			}
+
+			return payload
+		} catch (error) {
+			const isRetryableError =
+				error instanceof OpenAiRequestError
+					? isRetryableOpenAiStatus(error.status)
+					: error instanceof Error
+						? /timeout|timed out|gateway time-out|gateway timeout|fetch failed/i.test(error.message)
+						: false
+			if (!isRetryableError || attemptNumber >= maximumAttempts) {
+				throw error
+			}
+			await waitForRetryDelay(attemptNumber)
+		}
+	}
+	throw new Error('OpenAI request exhausted retry attempts.')
 }
 
 function createTranslateInstructions(
@@ -147,6 +191,10 @@ function buildPublishTranslationToolDefinition(): Record<string, unknown> {
 	}
 }
 
+function buildChatOutputModalities(speechOutputEnabled: boolean): string[] {
+	return [speechOutputEnabled ? 'audio' : 'text']
+}
+
 export async function createRealtimeClientSecretAction(input?: unknown): Promise<{
 	expiresAt: number
 	value: string
@@ -179,7 +227,7 @@ export async function createRealtimeClientSecretAction(input?: unknown): Promise
 			},
 			instructions: parsedInput.instructions ?? '',
 			model: parsedInput.model,
-			output_modalities: [parsedInput.speechOutputEnabled ? 'audio' : 'text'],
+			output_modalities: buildChatOutputModalities(parsedInput.speechOutputEnabled),
 			type: 'realtime'
 		}
 	})
@@ -232,7 +280,7 @@ export async function createRealtimeTranscriptionSessionAction(input: unknown): 
 	value: string
 }> {
 	const parsedInput = CreateRealtimeTranscriptionSessionActionInputSchema.parse(input)
-	const transcriptionModel = resolveTranscriptionModelForAsrProfile(parsedInput.asrProfile)
+	const transcriptionModel = resolveTranscriptionModelFromEnvironment(parsedInput.asrProfile)
 
 	const payload = await postOpenAi('/realtime/transcription_sessions', {
 		include: ['item.input_audio_transcription.logprobs'],

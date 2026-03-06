@@ -8,10 +8,16 @@ import {
 	InputAudioTranscriptionDeltaEventSchema,
 	RealtimeBaseServerEventSchema,
 	RealtimeErrorEventSchema,
+	ResponseContentPartAddedEventSchema,
+	ResponseContentPartDoneEventSchema,
 	ResponseCreatedEventSchema,
 	ResponseDoneEventSchema,
+	ResponseOutputAudioDoneEventSchema,
 	ResponseOutputAudioTranscriptDeltaEventSchema,
+	ResponseOutputAudioTranscriptDoneEventSchema,
 	ResponseOutputItemAddedEventSchema,
+	ResponseOutputItemCreatedEventSchema,
+	ResponseOutputItemDoneEventSchema,
 	ResponseOutputTextDeltaEventSchema,
 	ResponseOutputTextDoneEventSchema
 } from '@/realtime/schemas'
@@ -53,6 +59,10 @@ function createClientItemId(prefix: string): string {
 
 const shouldEmitVerboseRealtimeLogs = process.env.NEXT_PUBLIC_LILAC_VERBOSE_LOGS === 'true'
 
+function buildChatOutputModalities(speechOutputEnabled: boolean): Array<'audio' | 'text'> {
+	return [speechOutputEnabled ? 'audio' : 'text']
+}
+
 function emitChatRealtimeLog(
 	level: 'error' | 'info' | 'warn',
 	event: string,
@@ -85,6 +95,7 @@ export class ChatRealtimeClient {
 	private dataChannel: null | RTCDataChannel = null
 	private generation = 0
 	private localAudioStream: MediaStream | null = null
+	private pendingOutboundEventQueue: Array<Record<string, unknown>> = []
 	private slotByAssistantItemId = new Map<string, { slotId: string; slotOrder: number }>()
 	private slotByResponseId = new Map<string, { slotId: string; slotOrder: number }>()
 	private slotByUserItemId = new Map<string, { slotId: string; slotOrder: number }>()
@@ -141,6 +152,7 @@ export class ChatRealtimeClient {
 
 			dataChannel.addEventListener('open', () => {
 				if (generation !== this.generation) return
+				this.flushPendingEvents()
 				this.callbacks.onConnectionStateChange('connected')
 				emitChatRealtimeLog('info', 'channel_open', { generation })
 			})
@@ -202,6 +214,7 @@ export class ChatRealtimeClient {
 		this.nextSlotOrder = 1
 		this.pendingTextByResponseId.clear()
 		this.pendingAudioTranscriptByResponseId.clear()
+		this.pendingOutboundEventQueue = []
 
 		try {
 			this.dataChannel?.close()
@@ -264,7 +277,7 @@ export class ChatRealtimeClient {
 
 	public updateSpeechOutputEnabled(speechOutputEnabled: boolean): void {
 		this.sendSessionUpdate({
-			output_modalities: [speechOutputEnabled ? 'audio' : 'text']
+			output_modalities: buildChatOutputModalities(speechOutputEnabled)
 		})
 		if (!speechOutputEnabled) this.callbacks.onRemoteStream(null)
 	}
@@ -485,20 +498,31 @@ export class ChatRealtimeClient {
 
 	private handleResponseOutputItemAddedEvent(candidate: unknown): void {
 		const event = ResponseOutputItemAddedEventSchema.parse(candidate)
-		const responseId = event.response_id
+		this.bindAssistantItemToResponse(event.item.id, event.response_id)
+	}
+
+	private handleResponseOutputItemCreatedEvent(candidate: unknown): void {
+		const event = ResponseOutputItemCreatedEventSchema.parse(candidate)
+		this.bindAssistantItemToResponse(event.item.id, event.response_id)
+	}
+
+	private bindAssistantItemToResponse(
+		assistantItemId: string,
+		responseId: string | undefined
+	): void {
 		if (!responseId) return
-		this.assistantItemIdByResponseId.set(responseId, event.item.id)
+		this.assistantItemIdByResponseId.set(responseId, assistantItemId)
 		this.bindResponseToSlot(responseId)
 		const slot = this.resolveSlotForAssistantMessage(undefined, responseId)
 		if (slot) {
-			this.slotByAssistantItemId.set(event.item.id, slot)
+			this.slotByAssistantItemId.set(assistantItemId, slot)
 		}
 
 		const pendingText = this.pendingTextByResponseId.get(responseId)
 		if (pendingText) {
 			this.emitTranscriptPatch({
 				appendText: pendingText,
-				id: event.item.id,
+				id: assistantItemId,
 				role: 'assistant',
 				...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 				source: 'response_output_text',
@@ -511,7 +535,7 @@ export class ChatRealtimeClient {
 		if (pendingAudioTranscript) {
 			this.emitTranscriptPatch({
 				appendText: pendingAudioTranscript,
-				id: event.item.id,
+				id: assistantItemId,
 				role: 'assistant',
 				...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
 				source: 'response_output_audio_transcript',
@@ -568,6 +592,202 @@ export class ChatRealtimeClient {
 		})
 	}
 
+	private handleResponseOutputAudioTranscriptDoneEvent(candidate: unknown): void {
+		const event = ResponseOutputAudioTranscriptDoneEventSchema.parse(candidate)
+		const assistantItemId =
+			event.item_id ??
+			(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
+		if (!assistantItemId) return
+		const slot = this.resolveSlotForAssistantMessage(assistantItemId, event.response_id)
+		if (typeof event.transcript === 'string' && event.transcript.trim()) {
+			this.emitTranscriptPatch({
+				id: assistantItemId,
+				replaceText: event.transcript,
+				role: 'assistant',
+				...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
+				source: 'response_output_audio_transcript',
+				status: 'final'
+			})
+			return
+		}
+		this.emitTranscriptPatch({
+			id: assistantItemId,
+			role: 'assistant',
+			...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
+			source: 'response_output_audio_transcript',
+			status: 'final'
+		})
+	}
+
+	private extractAssistantTranscriptFromContentPart(
+		part: unknown
+	): null | { source: 'response_output_audio_transcript' | 'response_output_text'; text: string } {
+		if (typeof part !== 'object' || part === null) return null
+		if ('transcript' in part && typeof part.transcript === 'string' && part.transcript.trim()) {
+			return {
+				source: 'response_output_audio_transcript',
+				text: part.transcript.trim()
+			}
+		}
+		if ('text' in part && typeof part.text === 'string' && part.text.trim()) {
+			return {
+				source: 'response_output_text',
+				text: part.text.trim()
+			}
+		}
+		return null
+	}
+
+	private extractAssistantTranscriptFromOutputItem(
+		item: unknown
+	): null | { source: 'response_output_audio_transcript' | 'response_output_text'; text: string } {
+		if (typeof item !== 'object' || item === null) return null
+		if ('transcript' in item && typeof item.transcript === 'string' && item.transcript.trim()) {
+			return {
+				source: 'response_output_audio_transcript',
+				text: item.transcript.trim()
+			}
+		}
+		if (!('content' in item) || !Array.isArray(item.content)) return null
+		const textPartList: string[] = []
+		const audioTranscriptPartList: string[] = []
+		for (const contentPart of item.content) {
+			if (typeof contentPart !== 'object' || contentPart === null) continue
+			if (
+				'transcript' in contentPart &&
+				typeof contentPart.transcript === 'string' &&
+				contentPart.transcript.trim()
+			) {
+				audioTranscriptPartList.push(contentPart.transcript.trim())
+			}
+			if ('text' in contentPart && typeof contentPart.text === 'string' && contentPart.text.trim()) {
+				textPartList.push(contentPart.text.trim())
+			}
+		}
+		if (audioTranscriptPartList.length > 0) {
+			return {
+				source: 'response_output_audio_transcript',
+				text: audioTranscriptPartList.join('\n')
+			}
+		}
+		if (textPartList.length > 0) {
+			return {
+				source: 'response_output_text',
+				text: textPartList.join('\n')
+			}
+		}
+		return null
+	}
+
+	private emitPendingAssistantTranscript(
+		responseId: string,
+		patch: { source: 'response_output_audio_transcript' | 'response_output_text'; text: string }
+	): void {
+		switch (patch.source) {
+			case 'response_output_audio_transcript': {
+				const previousText = this.pendingAudioTranscriptByResponseId.get(responseId) ?? ''
+				this.pendingAudioTranscriptByResponseId.set(responseId, patch.text || previousText)
+				return
+			}
+			case 'response_output_text': {
+				const previousText = this.pendingTextByResponseId.get(responseId) ?? ''
+				this.pendingTextByResponseId.set(responseId, patch.text || previousText)
+				return
+			}
+			default:
+				return
+		}
+	}
+
+	private emitAssistantTranscriptFromPatch(input: {
+		assistantItemId?: string | undefined
+		patch: { source: 'response_output_audio_transcript' | 'response_output_text'; text: string }
+		responseId?: string | undefined
+		status: 'final' | 'streaming'
+	}): void {
+		const assistantItemId =
+			input.assistantItemId ??
+			(input.responseId ? this.assistantItemIdByResponseId.get(input.responseId) : undefined)
+		if (!assistantItemId) {
+			if (input.responseId) {
+				this.emitPendingAssistantTranscript(input.responseId, input.patch)
+			}
+			return
+		}
+		const slot = this.resolveSlotForAssistantMessage(assistantItemId, input.responseId)
+		this.emitTranscriptPatch({
+			...(input.status === 'final'
+				? { replaceText: input.patch.text }
+				: { appendText: input.patch.text }),
+			id: assistantItemId,
+			role: 'assistant',
+			...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
+			source: input.patch.source,
+			status: input.status
+		})
+	}
+
+	private handleResponseContentPartAddedEvent(candidate: unknown): void {
+		const event = ResponseContentPartAddedEventSchema.parse(candidate)
+		const patch = this.extractAssistantTranscriptFromContentPart(event.part)
+		if (!patch) return
+		this.emitAssistantTranscriptFromPatch({
+			assistantItemId: event.item_id,
+			patch,
+			responseId: event.response_id,
+			status: 'streaming'
+		})
+	}
+
+	private handleResponseContentPartDoneEvent(candidate: unknown): void {
+		const event = ResponseContentPartDoneEventSchema.parse(candidate)
+		const patch = this.extractAssistantTranscriptFromContentPart(event.part)
+		if (!patch) return
+		this.emitAssistantTranscriptFromPatch({
+			assistantItemId: event.item_id,
+			patch,
+			responseId: event.response_id,
+			status: 'final'
+		})
+	}
+
+	private handleResponseOutputAudioDoneEvent(candidate: unknown): void {
+		const event = ResponseOutputAudioDoneEventSchema.parse(candidate)
+		const patch =
+			(typeof event.transcript === 'string' && event.transcript.trim()
+				? {
+						source: 'response_output_audio_transcript' as const,
+						text: event.transcript.trim()
+					}
+				: this.extractAssistantTranscriptFromContentPart(event.part)) ?? null
+		if (!patch) return
+		this.emitAssistantTranscriptFromPatch({
+			assistantItemId: event.item_id,
+			patch,
+			responseId: event.response_id,
+			status: 'final'
+		})
+	}
+
+	private handleResponseOutputItemDoneEvent(candidate: unknown): void {
+		const event = ResponseOutputItemDoneEventSchema.parse(candidate)
+		const assistantItemId =
+			event.item.id ??
+			(event.response_id ? this.assistantItemIdByResponseId.get(event.response_id) : undefined)
+		if (!assistantItemId) return
+		const transcript = this.extractAssistantTranscriptFromOutputItem(event.item)
+		if (!transcript) return
+		const slot = this.resolveSlotForAssistantMessage(assistantItemId, event.response_id)
+		this.emitTranscriptPatch({
+			id: assistantItemId,
+			replaceText: transcript.text,
+			role: 'assistant',
+			...(slot ? { slotId: slot.slotId, slotOrder: slot.slotOrder } : {}),
+			source: transcript.source,
+			status: 'final'
+		})
+	}
+
 	private handleResponseOutputTextDoneEvent(candidate: unknown): void {
 		const event = ResponseOutputTextDoneEventSchema.parse(candidate)
 		const assistantItemId =
@@ -593,6 +813,40 @@ export class ChatRealtimeClient {
 			source: 'response_output_text',
 			status: 'final'
 		})
+	}
+
+	private handleResponseDoneEvent(candidate: unknown): void {
+		const event = ResponseDoneEventSchema.parse(candidate)
+		const responseId = event.response_id ?? event.response?.id
+		const outputItemList = Array.isArray(event.response?.output) ? event.response.output : []
+		let didEmitTranscript = false
+		for (const outputItem of outputItemList) {
+			const itemId =
+				typeof outputItem === 'object' && outputItem !== null && 'id' in outputItem
+					? typeof outputItem.id === 'string'
+						? outputItem.id
+						: undefined
+					: undefined
+			if (itemId && responseId) {
+				this.bindAssistantItemToResponse(itemId, responseId)
+			}
+			const patch = this.extractAssistantTranscriptFromOutputItem(outputItem)
+			if (!patch) continue
+			this.emitAssistantTranscriptFromPatch({
+				assistantItemId: itemId,
+				patch,
+				responseId,
+				status: 'final'
+			})
+			didEmitTranscript = true
+		}
+		if (!didEmitTranscript) {
+			emitChatRealtimeLog('info', 'response_done_without_transcript_payload', {
+				outputItemCount: outputItemList.length,
+				responseId
+			})
+		}
+		this.finalizeAssistantForResponse(responseId)
 	}
 
 	private sendSessionUpdate(sessionPatch: Record<string, unknown>): void {
@@ -642,12 +896,36 @@ export class ChatRealtimeClient {
 					this.handleResponseOutputItemAddedEvent(candidate)
 					return
 				}
+				case 'response.output_item.created': {
+					this.handleResponseOutputItemCreatedEvent(candidate)
+					return
+				}
+				case 'response.content_part.added': {
+					this.handleResponseContentPartAddedEvent(candidate)
+					return
+				}
 				case 'response.output_text.delta': {
 					this.handleResponseOutputTextDeltaEvent(candidate)
 					return
 				}
+				case 'response.output_audio.done': {
+					this.handleResponseOutputAudioDoneEvent(candidate)
+					return
+				}
 				case 'response.output_audio_transcript.delta': {
 					this.handleResponseOutputAudioTranscriptDeltaEvent(candidate)
+					return
+				}
+				case 'response.output_audio_transcript.done': {
+					this.handleResponseOutputAudioTranscriptDoneEvent(candidate)
+					return
+				}
+				case 'response.content_part.done': {
+					this.handleResponseContentPartDoneEvent(candidate)
+					return
+				}
+				case 'response.output_item.done': {
+					this.handleResponseOutputItemDoneEvent(candidate)
 					return
 				}
 				case 'response.output_text.done': {
@@ -655,8 +933,7 @@ export class ChatRealtimeClient {
 					return
 				}
 				case 'response.done': {
-					const event = ResponseDoneEventSchema.parse(candidate)
-					this.finalizeAssistantForResponse(event.response_id ?? event.response?.id)
+					this.handleResponseDoneEvent(candidate)
 					return
 				}
 				case 'error': {
@@ -668,9 +945,37 @@ export class ChatRealtimeClient {
 					return
 				}
 				default:
+					if (
+						typeof baseEvent.type === 'string' &&
+						(baseEvent.type.startsWith('response.') || baseEvent.type.startsWith('conversation.item.'))
+					) {
+						emitChatRealtimeLog('info', 'unhandled_server_event', {
+							eventType: baseEvent.type,
+							keys:
+								typeof candidate === 'object' && candidate !== null
+									? Object.keys(candidate as Record<string, unknown>).slice(0, 16)
+									: []
+						})
+					}
 					return
 			}
-		} catch {
+		} catch (error) {
+			emitChatRealtimeLog('warn', 'event_parse_ignored', {
+				message: error instanceof Error ? error.message : 'unknown',
+				rawType:
+					typeof rawData === 'string'
+						? (() => {
+								try {
+									const parsedData = JSON.parse(rawData) as Record<string, unknown>
+									return typeof parsedData.type === 'string' ? parsedData.type : 'unknown'
+								} catch {
+									return 'unparseable'
+								}
+							})()
+						: typeof rawData === 'object' && rawData !== null && 'type' in rawData
+							? String((rawData as Record<string, unknown>).type)
+							: 'unknown'
+			})
 			// Ignore unrecognized event payloads; the Realtime stream can contain event shapes
 			// that this client does not need for transcript rendering.
 			return
@@ -678,10 +983,34 @@ export class ChatRealtimeClient {
 	}
 
 	private sendEvent(event: Record<string, unknown>): void {
-		if (!this.dataChannel) return
-		if (this.dataChannel.readyState !== 'open') return
+		if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+			this.pendingOutboundEventQueue.push(event)
+			emitChatRealtimeLog('info', 'event_queued_until_channel_open', {
+				eventType: typeof event.type === 'string' ? event.type : 'unknown',
+				queueSize: this.pendingOutboundEventQueue.length
+			})
+			return
+		}
 		try {
 			this.dataChannel.send(JSON.stringify(event))
 		} catch {}
+	}
+
+	private flushPendingEvents(): void {
+		if (!this.dataChannel || this.dataChannel.readyState !== 'open') return
+		if (this.pendingOutboundEventQueue.length === 0) return
+		const pendingEventList = this.pendingOutboundEventQueue.slice()
+		this.pendingOutboundEventQueue = []
+		for (const event of pendingEventList) {
+			try {
+				this.dataChannel.send(JSON.stringify(event))
+			} catch {
+				this.pendingOutboundEventQueue.unshift(event)
+				return
+			}
+		}
+		emitChatRealtimeLog('info', 'queued_events_flushed', {
+			flushedCount: pendingEventList.length
+		})
 	}
 }

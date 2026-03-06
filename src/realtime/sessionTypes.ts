@@ -29,6 +29,49 @@ export type LiveSubtitleState = {
 	updatedAt: number
 }
 
+export type SubtitleSegmentState = {
+	segmentId: string
+	previousSegmentId: null | string
+	utteranceId: string
+	draftText: string
+	finalText: string
+	committedAt: null | number
+	confidence?: number
+}
+
+export type TranslateUtterancePhase = 'listening' | 'draft' | 'final' | 'error'
+
+export type TranslateUtteranceState = {
+	utteranceId: string
+	previousUtteranceId: null | string
+	orderedSegmentIds: string[]
+	sourceLiveText: string
+	sourceCommittedText: string
+	draftTranslatedText: string
+	finalTranslatedText: string
+	phase: TranslateUtterancePhase
+	inputOrigin: 'audio' | 'text'
+	sourceLanguageCode: string
+	targetLanguageCode: string
+	direction: UtteranceDirection
+	createdAt: number
+	utteranceSequence: number
+	draftSequence: number
+	lastDraftAt?: number
+	responseId?: string
+	errorMessage?: string
+}
+
+export type TranslateRuntimeState = {
+	activeAudioUtteranceId: null | string
+	activeAudioUtteranceUpdatedAt: null | number
+	lastAudioUtteranceId: null | string
+	nextUtteranceSequence: number
+	orderedUtteranceIds: string[]
+	segmentById: Record<string, SubtitleSegmentState>
+	utteranceById: Record<string, TranslateUtteranceState>
+}
+
 export type TranslateSegmentAggregationState = {
 	activeUtteranceId: null | string
 	lastFinalizedAt: null | number

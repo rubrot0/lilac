@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
+import { emitLilacTestBusEvent, setLilacTestAssistantAudioElement } from '@/evals/testBus'
 import { useLilacModeRuntime } from '@/realtime/modeRuntimeStore'
 
 export default function ChatMode() {
@@ -55,13 +56,39 @@ export default function ChatMode() {
 		}
 		const playbackAudioElement = playbackAudioElementRef.current
 		if (!playbackAudioElement) return
+		setLilacTestAssistantAudioElement(playbackAudioElement)
+
+		function handlePlaying(): void {
+			emitLilacTestBusEvent({
+				eventType: 'assistant_audio_state_changed',
+				isPlaying: true
+			})
+		}
+
+		function handleStopped(): void {
+			emitLilacTestBusEvent({
+				eventType: 'assistant_audio_state_changed',
+				isPlaying: false
+			})
+		}
+
+		playbackAudioElement.addEventListener('ended', handleStopped)
+		playbackAudioElement.addEventListener('pause', handleStopped)
+		playbackAudioElement.addEventListener('playing', handlePlaying)
 		playbackAudioElement.srcObject = chatSpeechOutputEnabled ? remoteAudioStream : null
 		if (chatSpeechOutputEnabled && remoteAudioStream) {
 			void playbackAudioElement.play().catch(() => {})
+		} else {
+			handleStopped()
 		}
 		return () => {
+			playbackAudioElement.removeEventListener('ended', handleStopped)
+			playbackAudioElement.removeEventListener('pause', handleStopped)
+			playbackAudioElement.removeEventListener('playing', handlePlaying)
 			playbackAudioElement.pause()
 			playbackAudioElement.srcObject = null
+			setLilacTestAssistantAudioElement(null)
+			handleStopped()
 		}
 	}, [chatSpeechOutputEnabled, remoteAudioStream])
 

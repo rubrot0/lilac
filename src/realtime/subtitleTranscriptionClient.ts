@@ -1,8 +1,8 @@
 'use client'
 
 import { createRealtimeTranscriptionSessionAction } from '@/app/actions/realtime'
+import { resolveTranscriptionModelFromEnvironment } from '@/realtime/modelConfig'
 import {
-	defaultInputTranscriptionModel,
 	InputAudioBufferCommittedEventSchema,
 	InputAudioBufferSpeechStartedEventSchema,
 	InputAudioBufferSpeechStoppedEventSchema,
@@ -46,7 +46,22 @@ export type SubtitleTranscriptionClientCallbacks = {
 	onSubtitleFinal: (patch: SubtitleFinalPatch) => void
 }
 
+function parsePositiveIntegerEnvironmentValue(
+	name: string,
+	fallbackValue: number,
+	bounds: { maximum: number; minimum: number }
+): number {
+	const rawValue = process.env[name]
+	if (!rawValue) return fallbackValue
+	const parsedValue = Number.parseInt(rawValue, 10)
+	if (!Number.isFinite(parsedValue)) return fallbackValue
+	return Math.max(bounds.minimum, Math.min(bounds.maximum, parsedValue))
+}
+
 function createTranscriptionSessionPatch(): Record<string, unknown> {
+	const transcriptionModel = resolveTranscriptionModelFromEnvironment(
+		resolveAsrProfileFromEnvironment()
+	)
 	return {
 		include: ['item.input_audio_transcription.logprobs'],
 		input_audio_format: 'pcm16',
@@ -54,7 +69,7 @@ function createTranscriptionSessionPatch(): Record<string, unknown> {
 			type: 'near_field'
 		},
 		input_audio_transcription: {
-			model: defaultInputTranscriptionModel
+			model: transcriptionModel
 		},
 		turn_detection: null
 	}
@@ -162,8 +177,17 @@ function computeRootMeanSquare(sampleList: Float32Array): number {
 	return Math.sqrt(squareSum / sampleList.length)
 }
 
-const manualCommitIntervalMilliseconds = 360
-const minimumCommitAudioDurationMilliseconds = 180
+const manualCommitIntervalMilliseconds = parsePositiveIntegerEnvironmentValue(
+	'NEXT_PUBLIC_LILAC_TRANSLATE_COMMIT_INTERVAL_MS',
+	780,
+	{ maximum: 2_000, minimum: 240 }
+)
+const minimumCommitAudioDurationMilliseconds = parsePositiveIntegerEnvironmentValue(
+	'NEXT_PUBLIC_LILAC_TRANSLATE_MIN_COMMIT_AUDIO_MS',
+	280,
+	{ maximum: 1_000, minimum: 180 }
+)
+const minimumForcedCommitAudioDurationMilliseconds = 140
 const speechDetectionHangoverMilliseconds = 220
 const speechDetectionRootMeanSquareThreshold = 0.008
 const transcriptionSampleRateHertz = 24_000
@@ -199,6 +223,7 @@ export class SubtitleTranscriptionClient {
 	private commitTimerId: null | number = null
 	private committedAtByItemId = new Map<string, number>()
 	private generation = 0
+	private lastCompletedConfidence: number | null = null
 	private localAudioStream: MediaStream | null = null
 	private micProcessorNode: ScriptProcessorNode | null = null
 	private micSourceNode: MediaStreamAudioSourceNode | null = null
@@ -285,6 +310,7 @@ export class SubtitleTranscriptionClient {
 		this.generation += 1
 		this.stopVoiceInput()
 		this.committedAtByItemId.clear()
+		this.lastCompletedConfidence = null
 		this.previousItemIdByItemId.clear()
 		this.segmentSequence = 0
 
@@ -329,10 +355,21 @@ export class SubtitleTranscriptionClient {
 
 	private commitAudioBufferIfReady(forceCommit: boolean): void {
 		if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) return
+		const effectiveMinimumCommitAudioDurationMilliseconds =
+			typeof this.lastCompletedConfidence === 'number' && this.lastCompletedConfidence < 0.55
+				? minimumCommitAudioDurationMilliseconds + 120
+				: minimumCommitAudioDurationMilliseconds
 		if (
 			!forceCommit &&
-			this.pendingAudioDurationMilliseconds < minimumCommitAudioDurationMilliseconds
+			this.pendingAudioDurationMilliseconds < effectiveMinimumCommitAudioDurationMilliseconds
 		) {
+			return
+		}
+		if (
+			forceCommit &&
+			this.pendingAudioDurationMilliseconds < minimumForcedCommitAudioDurationMilliseconds
+		) {
+			this.pendingAudioDurationMilliseconds = 0
 			return
 		}
 		if (this.pendingAudioDurationMilliseconds <= 0) return
@@ -341,6 +378,7 @@ export class SubtitleTranscriptionClient {
 		})
 		emitSubtitleClientLog('info', 'manual_commit', {
 			audioDurationMilliseconds: Math.round(this.pendingAudioDurationMilliseconds),
+			effectiveMinimumCommitAudioDurationMilliseconds,
 			forceCommit
 		})
 		this.pendingAudioDurationMilliseconds = 0
@@ -470,6 +508,7 @@ export class SubtitleTranscriptionClient {
 		if (!transcript) return
 		this.segmentSequence += 1
 		const confidence = computeConfidenceFromLogprobs(event.logprobs)
+		this.lastCompletedConfidence = typeof confidence === 'number' ? confidence : null
 		this.callbacks.onSubtitleFinal({
 			committedAt: this.committedAtByItemId.get(event.item_id) ?? Date.now(),
 			itemId: event.item_id,

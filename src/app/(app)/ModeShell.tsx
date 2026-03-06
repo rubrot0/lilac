@@ -26,8 +26,9 @@ import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import { emitLilacTestBusEvent } from '@/evals/testBus'
 import { useLilacModeRuntime } from '@/realtime/modeRuntimeStore'
-import type { LilacMode } from '@/realtime/sessionTypes'
+import type { ConnectionUiState, LilacMode } from '@/realtime/sessionTypes'
 
 const defaultChatInstructions =
 	'You are Lilac. Help users communicate across languages. Keep answers concise, faithful, and practical.'
@@ -37,32 +38,24 @@ function normalizeTurnDelaySeconds(value: number): number {
 	return Math.round(clampedValue * 10) / 10
 }
 
-function resolveLiveIndicatorLabel(connectionState: string, statusMessage: null | string): string {
-	if (statusMessage === 'Offline. Waiting for network…') return 'Offline'
-	switch (connectionState) {
-		case 'connected':
-			return 'Live'
-		case 'connecting':
-			return 'Connecting'
-		case 'error':
-			return 'Error'
-		default:
-			return statusMessage ? 'Reconnecting' : 'Idle'
-	}
+function resolveLiveIndicatorLabel(connectionUiState: ConnectionUiState): string {
+	if (connectionUiState.isOffline) return 'Offline'
+	if (connectionUiState.isReconnecting) return 'Reconnecting'
+	if (connectionUiState.isLive) return 'Live'
+	if (connectionUiState.statusMessage === 'Connecting…') return 'Connecting'
+	if (connectionUiState.statusMessage === 'Connection error.') return 'Error'
+	return 'Idle'
 }
 
-function resolveLiveIndicatorClass(connectionState: string, statusMessage: null | string): string {
-	if (statusMessage === 'Offline. Waiting for network…') return 'bg-[var(--destructive)]'
-	switch (connectionState) {
-		case 'connected':
-			return 'bg-[var(--lilac-direction-secondary)]'
-		case 'connecting':
-			return 'animate-pulse bg-[var(--lilac-direction-secondary)]/70'
-		case 'error':
-			return 'bg-[var(--destructive)]'
-		default:
-			return 'bg-[var(--lilac-border-strong)]'
+function resolveLiveIndicatorClass(connectionUiState: ConnectionUiState): string {
+	if (connectionUiState.isOffline || connectionUiState.statusMessage === 'Connection error.') {
+		return 'bg-[var(--destructive)]'
 	}
+	if (connectionUiState.isLive) return 'bg-[var(--lilac-direction-secondary)]'
+	if (connectionUiState.isReconnecting || connectionUiState.statusMessage === 'Connecting…') {
+		return 'animate-pulse bg-[var(--lilac-direction-secondary)]/70'
+	}
+	return 'bg-[var(--lilac-border-strong)]'
 }
 
 function renderMode(mode: LilacMode): ReactNode {
@@ -252,6 +245,7 @@ export default function ModeShell() {
 		chatSpeechOutputEnabled,
 		chatTurnDelaySeconds,
 		connectionState,
+		connectionUiState,
 		errorMessage,
 		mode,
 		setChatInstructions,
@@ -266,8 +260,8 @@ export default function ModeShell() {
 	const [draftInstructions, setDraftInstructions] = useState(chatInstructions)
 	const [draftTurnDelaySeconds, setDraftTurnDelaySeconds] = useState(chatTurnDelaySeconds)
 	const [saveMessage, setSaveMessage] = useState('')
-	const liveIndicatorLabel = resolveLiveIndicatorLabel(connectionState, statusMessage)
-	const liveIndicatorClass = resolveLiveIndicatorClass(connectionState, statusMessage)
+	const liveIndicatorLabel = resolveLiveIndicatorLabel(connectionUiState)
+	const liveIndicatorClass = resolveLiveIndicatorClass(connectionUiState)
 
 	useEffect(() => {
 		setDraftInstructions(chatInstructions)
@@ -282,6 +276,28 @@ export default function ModeShell() {
 		const timeoutId = window.setTimeout(() => setSaveMessage(''), 1500)
 		return () => window.clearTimeout(timeoutId)
 	}, [saveMessage])
+
+	useEffect(() => {
+		emitLilacTestBusEvent({
+			eventType: 'mode_changed',
+			mode
+		})
+	}, [mode])
+
+	useEffect(() => {
+		emitLilacTestBusEvent({
+			connectionState,
+			eventType: 'connection_state_changed',
+			statusMessage
+		})
+	}, [connectionState, statusMessage])
+
+	useEffect(() => {
+		emitLilacTestBusEvent({
+			errorMessage,
+			eventType: 'visible_error_changed'
+		})
+	}, [errorMessage])
 
 	function saveChatSettings(): void {
 		setChatInstructions(draftInstructions.trim() || defaultChatInstructions)

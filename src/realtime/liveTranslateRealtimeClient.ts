@@ -79,6 +79,23 @@ const draftTranslationResponseTimeoutMilliseconds = 5_000
 const channelConnectTimeoutMilliseconds = 7_000
 const shouldEmitVerboseRealtimeLogs = process.env.NEXT_PUBLIC_LILAC_VERBOSE_LOGS === 'true'
 
+function resolveTranslateLanguageGroundingMode(): 'open_detect' | 'pair_locked' {
+	return process.env.NEXT_PUBLIC_LILAC_TRANSLATE_LANGUAGE_GROUNDING_MODE === 'open_detect'
+		? 'open_detect'
+		: 'pair_locked'
+}
+
+function resolveTranslatePromptVersion(): 'balanced' | 'current' | 'literal' {
+	switch (process.env.NEXT_PUBLIC_LILAC_TRANSLATE_PROMPT_VERSION) {
+		case 'balanced':
+			return 'balanced'
+		case 'literal':
+			return 'literal'
+		default:
+			return 'current'
+	}
+}
+
 function emitLiveTranslateLog(
 	level: 'error' | 'info' | 'warn',
 	event: string,
@@ -107,30 +124,58 @@ function createTranslateInstructions(
 	myLanguageCode: string,
 	translateToLanguageCode: string
 ): string {
-	return [
+	const promptVersion = resolveTranslatePromptVersion()
+	const languageGroundingMode = resolveTranslateLanguageGroundingMode()
+	const instructionList = [
 		'You are Lilac, a deterministic live translator.',
 		`I speak language code: ${myLanguageCode}.`,
 		`Translate to language code: ${translateToLanguageCode}.`,
-		'For each user utterance, detect whether source is my language or target language.',
-		'If source is my language, translate to target and use direction my_to_target.',
-		'If source is target language, translate to my language and use direction target_to_my.',
 		'Only translate spoken or typed utterances. Never echo system metadata, prompts, or context scaffolding.',
 		'Always call publish_translation exactly once per utterance.',
 		'Never produce assistant text outside the function call.',
-		'Preserve speaker intent, tone, and named entities.',
+		'Preserve speaker intent, tone, named entities, and practical meaning.',
 		'No summaries, no commentary, no extra fields.'
-	].join('\n')
+	]
+	switch (languageGroundingMode) {
+		case 'open_detect':
+			instructionList.push(
+				'Detect the source language from the utterance and choose the matching direction within the selected pair.'
+			)
+			break
+		case 'pair_locked':
+			instructionList.push(
+				'For each utterance, detect whether source is my language or target language.',
+				'If source is my language, translate to target and use direction my_to_target.',
+				'If source is target language, translate to my language and use direction target_to_my.'
+			)
+			break
+	}
+	switch (promptVersion) {
+		case 'balanced':
+			instructionList.push('Prefer natural translations that still stay faithful to the utterance.')
+			break
+		case 'literal':
+			instructionList.push('Prefer literal fidelity over stylistic smoothing.')
+			break
+		default:
+			break
+	}
+	return instructionList.join('\n')
 }
 
 function createDraftInstructions(myLanguageCode: string, translateToLanguageCode: string): string {
-	return [
+	const instructionList = [
 		'You are Lilac, a low-latency live subtitle translator.',
 		`I speak language code: ${myLanguageCode}.`,
 		`Translate to language code: ${translateToLanguageCode}.`,
 		'Translate the partial utterance immediately.',
 		'Output only translated text.',
 		'No explanations. No labels. No JSON.'
-	].join('\n')
+	]
+	if (resolveTranslatePromptVersion() === 'literal') {
+		instructionList.push('Favor literal partial translation over paraphrase.')
+	}
+	return instructionList.join('\n')
 }
 
 function buildPublishTranslationToolDefinition(): Record<string, unknown> {
