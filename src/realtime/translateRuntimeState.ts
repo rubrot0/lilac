@@ -6,6 +6,7 @@ import type {
 	LiveSubtitleState,
 	TranslateRuntimeState,
 	TranslateSettings,
+	TranslateUtterancePhase,
 	TranslateUtteranceState,
 	UtteranceCard
 } from '@/realtime/sessionTypes'
@@ -78,6 +79,25 @@ function isEquivalentTranscriptionChunk(leftValue: string, rightValue: string): 
 		return true
 	}
 	return false
+}
+
+function shouldHideShortEchoPreview(input: {
+	candidateCreatedAt: number
+	candidatePhase: TranslateUtterancePhase
+	candidateSourceText: string
+	inputOrigin: 'audio' | 'text'
+	previousCreatedAt: number
+	previousPhase: TranslateUtterancePhase
+}): boolean {
+	if (input.inputOrigin !== 'audio') return false
+	if (input.candidatePhase === 'final' || input.candidatePhase === 'error') return false
+	if (input.previousPhase !== 'final') return false
+	if (input.candidateCreatedAt - input.previousCreatedAt > 3_000) return false
+	const normalizedCandidateSourceText = normalizeWhitespace(input.candidateSourceText)
+	if (!normalizedCandidateSourceText) return true
+	const signalCharacterCount = canonicalizeTranscriptionText(normalizedCandidateSourceText).length
+	const wordCount = normalizedCandidateSourceText.split(' ').filter(Boolean).length
+	return signalCharacterCount <= 14 || wordCount <= 3
 }
 
 function findWordOverlapLength(existingText: string, nextText: string): number {
@@ -579,42 +599,61 @@ export function clearTranslateUtterance(
 }
 
 export function selectTranslateCards(state: TranslateRuntimeState): UtteranceCard[] {
-	return state.orderedUtteranceIds
-		.map(utteranceId => state.utteranceById[utteranceId])
-		.filter((utterance): utterance is TranslateUtteranceState => !!utterance)
-		.map(utterance => {
-			const translatedText =
-				utterance.finalTranslatedText || utterance.draftTranslatedText || utterance.errorMessage || ''
-			const status =
-				utterance.phase === 'final'
-					? 'final'
-					: utterance.phase === 'error'
-						? 'error'
-						: utterance.phase === 'draft'
-							? 'draft'
-							: 'streaming'
-			return {
-				createdAt: utterance.createdAt,
-				direction: utterance.direction,
-				draftSequence: utterance.draftSequence,
-				...(utterance.draftTranslatedText
-					? { draftTranslatedText: utterance.draftTranslatedText }
-					: {}),
-				...(utterance.errorMessage ? { errorMessage: utterance.errorMessage } : {}),
-				id: utterance.utteranceId,
+	const visibleCardList: UtteranceCard[] = []
+	let previousUtterance: null | TranslateUtteranceState = null
+
+	for (const utteranceId of state.orderedUtteranceIds) {
+		const utterance = state.utteranceById[utteranceId]
+		if (!utterance) continue
+		const sourceText = utterance.sourceCommittedText || utterance.sourceLiveText
+		if (
+			previousUtterance &&
+			shouldHideShortEchoPreview({
+				candidateCreatedAt: utterance.createdAt,
+				candidatePhase: utterance.phase,
+				candidateSourceText: sourceText,
 				inputOrigin: utterance.inputOrigin,
-				...(utterance.lastDraftAt ? { lastDraftAt: utterance.lastDraftAt } : {}),
-				renderState: utterance.phase,
-				...(utterance.responseId ? { responseId: utterance.responseId } : {}),
-				sourceItemId: utterance.utteranceId,
-				sourceLanguageCode: utterance.sourceLanguageCode,
-				sourceText: utterance.sourceCommittedText || utterance.sourceLiveText,
-				status,
-				targetLanguageCode: utterance.targetLanguageCode,
-				translatedText,
-				utteranceSequence: utterance.utteranceSequence
-			} satisfies UtteranceCard
-		})
+				previousCreatedAt: previousUtterance.createdAt,
+				previousPhase: previousUtterance.phase
+			})
+		) {
+			continue
+		}
+
+		const translatedText =
+			utterance.finalTranslatedText || utterance.draftTranslatedText || utterance.errorMessage || ''
+		const status =
+			utterance.phase === 'final'
+				? 'final'
+				: utterance.phase === 'error'
+					? 'error'
+					: utterance.phase === 'draft'
+						? 'draft'
+						: 'streaming'
+		const card = {
+			createdAt: utterance.createdAt,
+			direction: utterance.direction,
+			draftSequence: utterance.draftSequence,
+			...(utterance.draftTranslatedText ? { draftTranslatedText: utterance.draftTranslatedText } : {}),
+			...(utterance.errorMessage ? { errorMessage: utterance.errorMessage } : {}),
+			id: utterance.utteranceId,
+			inputOrigin: utterance.inputOrigin,
+			...(utterance.lastDraftAt ? { lastDraftAt: utterance.lastDraftAt } : {}),
+			renderState: utterance.phase,
+			...(utterance.responseId ? { responseId: utterance.responseId } : {}),
+			sourceItemId: utterance.utteranceId,
+			sourceLanguageCode: utterance.sourceLanguageCode,
+			sourceText,
+			status,
+			targetLanguageCode: utterance.targetLanguageCode,
+			translatedText,
+			utteranceSequence: utterance.utteranceSequence
+		} satisfies UtteranceCard
+		visibleCardList.push(card)
+		previousUtterance = utterance
+	}
+
+	return visibleCardList
 }
 
 export function selectLiveSubtitleState(
